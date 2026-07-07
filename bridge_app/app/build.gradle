@@ -31,5 +31,5 @@ dependencies {
     implementation 'com.google.code.gson:gson:2.10'
     implementation 'org.nanohttpd:nanohttpd:2.3.1'
     implementation 'androidx.core:core:1.9.0'
-    // AppCompat eliminado para evitar dependencia de AAPT2 sobre recursos externos
+    implementation 'androidx.appcompat:appcompat:1.6.1'
 }
