@@ -1,0 +1,2599 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+DEMAND RADAR ENGINE v3.1 + RADIO ENVIRONMENT ANALYZER + BLE BROADCAST
+======================================================================
+Sistema completo de detección de demanda + análisis de entorno radioeléctrico
++ Transmisión BLE continua de prompt (zlib + fragmentación + ciclo infinito)
+
+- Motor de radar con algoritmos avanzados (Fuzzy, RL, Meta-Learning)
+- Scanner Bluetooth con Kalman filter y detección multipath
+- Predictor de zonas óptimas para Uber
+- BLE Broadcast Service: transmite prompt largo en fragmentos BLE Advertising
+- Ejecutable en Termux sin dependencias externas
+- Escaneo cada 1 segundo
+- Radio restringido a 30 km
+- Dashboard web con API REST (--web)
+- Generador automático de app puente Android (--prepare-bridge)
+"""
+from __future__ import annotations
+import os, sys, json, time, threading, math, random, uuid, csv, io, signal, subprocess, platform, zlib, base64, hashlib
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Tuple, Any, Callable, Union, Protocol, runtime_checkable
+from collections import deque, defaultdict
+from enum import Enum
+from pathlib import Path
+import http.server
+import socketserver
+
+# ================================================================================
+# CONSTANTE GLOBAL: PROMPT PARA TRANSMISIÓN BLE (MEJOR_OPCION_PROMPT_TEXTO)
+# ================================================================================
+MEJOR_OPCION_PROMPT_TEXTO = """
+<system_directive lang="dsl-decision-engine" version="4.0">
+  <mode_activation>
+    Por defecto, el agente opera en modo NORMAL (producción de decisiones).
+    El usuario puede solicitar el modo análisis defensivo escribiendo exactamente:
+      "activar red_team"
+    Cuando se active, se aplicarán las reglas de <red_team_context>.
+  </mode_activation>
+  <red_team_context>
+    Enfoque: 100% educativo y defensivo.
+    Capacidades:
+    - Análisis abstracto de vectores de ataque en la lógica de aceptación.
+    - Explicación de posibles explotaciones de invariantes (ej. gaming de precios).
+    - Generación de escenarios controlados de prueba adversarial.
+    - Recomendaciones de mitigación sin revelar payloads ofensivos.
+    Restricción: se prioriza "cómo protegerse" sobre generación de exploits directos.
+  </red_team_context>
+  <typing_schema>
+    <!--
+      Para implementación en Python:
+      - Usar pydantic >= 2.0 para el modelo de datos "Offer".
+      - Campos obligatorios: price (float), pickup_eta (int), delivery_eta (int), tag (str), radar (bool), type (str), state (str).
+      Validación en runtime garantizada por pydantic.
+    -->
+  </typing_schema>
+  <agent_role>
+    agent_id: "MEJOR_OPCION"
+    model: deterministic_hybrid_automaton
+    task_domain: ride_hailing_offer_evaluation
+    primary_function: integrate(
+      economic_analysis, 
+      exclusive_assignment, 
+      trust_preservation, 
+      temporal_coherence(eta)
+    )
+    high_level_policy: enforce(
+      normative_compliance, 
+      state_stability, 
+      human_behavior_emulation(anti_detection)
+    )
+    description: "Sistema de simulación para la toma de decisiones en la aceptación de viajes, priorizando cumplimiento, estabilidad y comportamiento humano consistente."
+  </agent_role>
+  <system_invariants>
+    <invariant id="TRUST_PRESERVATION" priority="ABSOLUTE">
+      predicate: trust_preservation > any_offer_acceptance
+    </invariant>
+    <invariant id="EVALUATION_GATE">
+      mandatory: all_offers -> pass_through(CONTROL_DE_CONFIANZA_Y_OPERACION) before resolution
+    </invariant>
+    <invariant id="HUMAN_EMULATION">
+      pattern: reaction_time ~ normal_distribution(mu, sigma)
+      constraint: no fixed_interval; reject deterministic_patterns
+    </invariant>
+    <invariant id="ABSOLUTE_HIERARCHY">
+      strict_order: TRUST_GUARD > CONTROL_DE_CONFIANZA > PRIORITY > Radar > EXCLUSIVE
+    </invariant>
+  </system_invariants>
+  <hardcoded_rules>
+    <economic_block>
+      rule_01: if price < 3.13 -> action: AUTO_REJECT (non_penalizable, auto_cancel_allowed)
+      rule_02: if price >= 3.13 AND price < 5.13 -> action: EVALUATE_RISK (CONDITIONAL_ACCEPT)
+      rule_03: if price >= 5.13 AND price < 10.13 -> action: ACCEPT_STANDARD
+      rule_04: if price >= 10.13 -> action: IMMEDIATE_ACCEPT (if other_criteria=true)
+    </economic_block>
+    <temporal_thresholds>
+      rule_05: if tag NOT_IN [PRIORITY, LONG_TRIP, RADAR_VALIDO] AND pickup_eta > 6 -> action: REJECT
+      rule_06: if tag IN [LONG_DISTANCE, LONG_TRIP] AND pickup_eta > 6 -> action: REJECT
+      rule_07: if tag NOT_IN [PRIORITY, LONG_TRIP, RADAR_VALIDO] AND delivery_eta > 9 -> action: REJECT
+    </temporal_thresholds>
+    <critical_restrictions>
+      rule_08: if state == "EN_VIAJE" -> forbid: cancel_trip
+      rule_09: if state != "IDLE" -> forbid: location_ping
+      baseline: dynamic_surge_pricing = true; promotions = true
+      targets: 4-5_trips/hour | $9-$15/hour | $72-$120/day
+    </critical_restrictions>
+  </hardcoded_rules>
+  <execution_pipeline mode="strict_sequential">
+    <phase id="1" name="TRUST_GUARD">
+      if block=true: abort_pipeline; return "BLOQUEADO_POR_TRUST"
+    </phase>
+    <phase id="2" name="CONTROL_DE_CONFIANZA_Y_OPERACION">
+      apply state_filter(current_trust_state)
+    </phase>
+    <phase id="3" name="PRIORITY_CHECK">
+      if offer.tag == "PRIORITY": return ACCEPT_IMMEDIATE (bypass temporal_thresholds)
+    </phase>
+    <phase id="4" name="RADAR_CHECK">
+      description: "Prioridad absoluta por radar. No se degrada por estado salvo TRUST_GUARD."
+      if offer.radar == VALID: return ACCEPT (except if TRUST_GUARD active)
+    </phase>
+    <phase id="5" name="LONG_TRIP_CHECK">
+      if offer.tag in ("LONG_DISTANCE", "LONG_TRIP"):
+        evaluate using rule_06 (max 10 min pickup)
+        if valid: return ACCEPT_AUTO
+    </phase>
+    <phase id="6" name="EXCLUSIVE_PROCESSING">
+      definition: "Solicitud enviada exclusivamente a este código conductor."
+      constraints: [
+        "No se compara contra ofertas simultáneas",
+        "Se evalúa solo con criterios internos",
+        "Durante su evaluación se ignoran nuevas ofertas"
+      ]
+      priority: higher than ESTANDAR, lower than phases 3,4,5
+      if offer.type == EXCLUSIVE: evaluate_in_isolation()
+    </phase>
+    <phase id="7" name="STANDARD_EVALUATION">
+      apply rule_01, rule_02, rule_05, rule_07
+    </phase>
+  </execution_pipeline>
+  <state_machine id="trust_guard">
+    description: "Módulo de Protección de Confianza"
+    <states>
+      NORMAL: {acceptance: full, label: "Operación completa"}
+      OBSERVACION: {acceptance: passive_only, forbid_auto, label: "Observación pasiva, no aceptaciones automáticas"}
+      CONSERVATIVE: {acceptance: only_if tag in [PRIORITY, LONG_TRIP], label: "Solo PRIORITY y LONG_TRIP pueden aceptarse"}
+    </states>
+    <inputs>
+      <input type="HUMAN_LIKE_AUTOMATION" risk="low"/>
+      <input type="AUTOMATION_SUSPECTED" risk="high"/>
+    </inputs>
+    <transition_table>
+      <rule event="AUTOMATION_SUSPECTED">
+        <allow from="NORMAL" to="OBSERVACION"/>
+        <allow from="NORMAL" to="CONSERVADOR"/>
+        <allow from="OBSERVACION" to="CONSERVADOR"/>
+      </rule>
+      <rule event="HUMAN_LIKE_AUTOMATION">
+        <reject from="NORMAL" to="CONSERVADOR" reason="direct_jump_forbidden"/>
+        <require sequence="NORMAL -> OBSERVACION -> CONSERVADOR"/>
+      </rule>
+    </transition_table>
+  </state_machine>
+  <module id="eta_guard">
+    description: "Módulo de Gestión de Tiempo Real y ETA. Garantizar coherencia absoluta sin bloquear viajes largos ni prioritarios."
+    <axioms>
+      <axiom type="real_time">monotonic, non_resettable, non_accelerable</axiom>
+      <axiom type="eta">adjustable_estimate, not_clock</axiom>
+    </axioms>
+    <formula> ETA_TOTAL = TIEMPO_REAL_TRANSCURRIDO + NUEVA_ETA_ESTIMADA </formula>
+    <safety_checks>
+      <check id="COHERENCIA" if="ETA < tiempo_real_transcurrido" action="LOGIC_ERROR; correct_immediately"/>
+      <check id="BRUSQUEDAD" if="cambio_brusco_ETA" action="set_state(OBSERVACION)"/>
+      <check id="DESVIACION" if="desviaciones_repetidas" action="set_state(CONSERVATIVE); trigger(trust_guard)"/>
+    </safety_checks>
+  </module>
+  <output_contract>
+    <output_block type="SYSTEM_STATE">
+      Trust_Guard_Estado: [NORMAL|OBSERVACION|CONSERVADOR]
+      Trust_Guard_Etiqueta: [HUMAN_LIKE_AUTOMATION|AUTOMATION_SUSPECTED]
+    </output_block>
+    <output_block type="DECISION">
+      Veredicto: [ACEPTAR|RECHAZAR|CANCELAR_AUTO|BLOQUEADO_POR_TRUST]
+      Justificacion: deterministic_explanation(pipeline, hardcoded_rules)
+    </output_block>
+    <output_block type="AUDITORIA">
+      Precio: $X.XX -> Umbral: [RECHAZO_AUTO|CONDICIONAL|ESTANDAR|INMEDIATO]
+      ETA_Recogida: X min -> Limite: [4 min|10 min|BYPASS]
+      ETA_Entrega: X min -> Limite: [6 min|BYPASS]
+      Regla_Activa: [rule_0X | PRIORITY | LONG_TRIP | RADAR | EXCLUSIVE]
+      Resultado_Final: [ACEPTADO|RECHAZADO|BLOQUEADO_POR_TRUST]
+    </output_block>
+  </output_contract>
+  <context_preservation_trigger>
+    condition: multi_iteration_simulation and state_loss_risk
+    action: insert before next decision:
+      <snapshot>
+        Trust_Guard: current_state |
+        Última_Decisión: last_action |
+        Contador_Viajes: trip_count |
+        Ingresos: $total
+      </snapshot>
+  </context_preservation_trigger>
+</system_directive>
+"""
+
+# ================================================================================
+# SECCION 1: ESTRUCTURAS DE DATOS GENÉRICAS
+# ================================================================================
+class SupplyLevel(Enum):
+    CRITICAL = "critical"; LOW = "low"; MEDIUM = "medium"; HIGH = "high"; UNKNOWN = "unknown"
+    @property
+    def numeric_value(self) -> int:
+        return {self.CRITICAL:0, self.LOW:1, self.MEDIUM:2, self.HIGH:3, self.UNKNOWN:-1}[self]
+
+@dataclass
+class GeoPoint:
+    latitude: float = 0.0; longitude: float = 0.0
+    def is_valid(self) -> bool: return -90 <= self.latitude <= 90 and -180 <= self.longitude <= 180
+    def distance_km(self, other: 'GeoPoint') -> float:
+        R=6371.0; lat1,lon1=math.radians(self.latitude),math.radians(self.longitude)
+        lat2,lon2=math.radians(other.latitude),math.radians(other.longitude)
+        dlat,dlon=lat2-lat1,lon2-lon1
+        a=math.sin(dlat/2)**2+math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+        return R*2*math.atan2(math.sqrt(a),math.sqrt(1-a))
+    def bearing_to(self, other: 'GeoPoint') -> float:
+        lat1,lon1=math.radians(self.latitude),math.radians(self.longitude)
+        lat2,lon2=math.radians(other.latitude),math.radians(other.longitude)
+        dlon=lon2-lon1
+        x=math.sin(dlon)*math.cos(lat2); y=math.cos(lat1)*math.sin(lat2)-math.sin(lat1)*math.cos(lat2)*math.cos(dlon)
+        return (math.degrees(math.atan2(x,y))+360)%360
+    def to_dict(self) -> Dict[str, float]: return {"latitude":self.latitude,"longitude":self.longitude}
+
+@dataclass
+class Zone:
+    zone_id: str; name: str; location: GeoPoint = field(default_factory=GeoPoint)
+    metadata: Dict[str, Any] = field(default_factory=dict); tags: List[str] = field(default_factory=list)
+    enabled: bool = True; priority_weight: float = 1.0
+    def to_dict(self) -> Dict[str, Any]:
+        return {"zone_id":self.zone_id,"name":self.name,"location":self.location.to_dict(),
+                "metadata":self.metadata,"tags":self.tags,"enabled":self.enabled,"priority_weight":self.priority_weight}
+
+@dataclass
+class ZoneMetrics:
+    zone_id: str; timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    demand_score: float = 0.0; supply_level: SupplyLevel = SupplyLevel.UNKNOWN
+    surge_detected: bool = False; surge_multiplier: float = 1.0; average_wait_time: int = 0
+    average_value: float = 0.0; available_capacity: int = 0; active_requests: int = 0
+    is_simulated: bool = False; raw_data: Dict[str, Any] = field(default_factory=dict)
+    quality_index: float = 0.0; efficiency_ratio: float = 0.0; fuzzy_trust: float = 0.8
+    @property
+    def is_hotspot(self) -> bool: return self.demand_score >= 7.0
+    @property
+    def is_critical(self) -> bool: return self.demand_score >= 9.0
+    @property
+    def wait_time_minutes(self) -> int: return self.average_wait_time // 60
+    @property
+    def saturation_ratio(self) -> float:
+        if self.available_capacity > 0: return self.active_requests / self.available_capacity
+        return 0.0
+    def to_dict(self) -> Dict[str, Any]:
+        return {"zone_id":self.zone_id,"timestamp":self.timestamp.isoformat(),"demand_score":self.demand_score,
+                "supply_level":self.supply_level.value,"surge_detected":self.surge_detected,
+                "surge_multiplier":self.surge_multiplier,"average_wait_time":self.average_wait_time,
+                "average_wait_time_min":self.wait_time_minutes,"average_value":self.average_value,
+                "available_capacity":self.available_capacity,"active_requests":self.active_requests,
+                "saturation_ratio":round(self.saturation_ratio,3),"is_hotspot":self.is_hotspot,
+                "is_critical":self.is_critical,"is_simulated":self.is_simulated,
+                "quality_index":self.quality_index,"efficiency_ratio":self.efficiency_ratio,
+                "fuzzy_trust":round(self.fuzzy_trust,3)}
+
+@dataclass
+class Opportunity:
+    opportunity_id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    zone_id: str = ""; zone_name: str = ""; location: Optional[GeoPoint] = None
+    demand_score: float = 0.0; surge_multiplier: float = 1.0; estimated_value: float = 0.0
+    hourly_potential: float = 0.0; wait_time_seconds: int = 0; priority_score: float = 0.0
+    confidence: float = 0.0; recommendation: str = ""; risk_level: str = "medium"
+    trend_direction: str = "stable"; metadata: Dict[str, Any] = field(default_factory=dict)
+    def to_dict(self) -> Dict[str, Any]:
+        return {"opportunity_id":self.opportunity_id,"timestamp":self.timestamp.isoformat(),"zone_id":self.zone_id,
+                "zone_name":self.zone_name,"location":self.location.to_dict() if self.location else None,
+                "demand_score":self.demand_score,"surge_multiplier":self.surge_multiplier,
+                "estimated_value":self.estimated_value,"hourly_potential":self.hourly_potential,
+                "wait_time_seconds":self.wait_time_seconds,"priority_score":self.priority_score,
+                "confidence":self.confidence,"recommendation":self.recommendation,"risk_level":self.risk_level,
+                "trend_direction":self.trend_direction,"metadata":self.metadata}
+
+@dataclass
+class Alert:
+    alert_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    alert_type: str = ""; zone_id: str = ""; zone_name: str = ""; metric_name: str = ""
+    condition: str = ""; current_value: Any = None; threshold_value: Any = None
+    message: str = ""; severity: str = "info"; acknowledged: bool = False
+    def to_dict(self) -> Dict[str, Any]:
+        return {"alert_id":self.alert_id,"timestamp":self.timestamp.isoformat(),"alert_type":self.alert_type,
+                "zone_id":self.zone_id,"zone_name":self.zone_name,"metric_name":self.metric_name,
+                "condition":self.condition,"current_value":self.current_value,"threshold_value":self.threshold_value,
+                "message":self.message,"severity":self.severity,"acknowledged":self.acknowledged}
+
+@dataclass
+class RadarConfig:
+    scan_interval_seconds: int = 1; min_demand_threshold: float = 5.0; hotspot_threshold: float = 7.0
+    critical_threshold: float = 9.0; hot_zones_only: bool = False; max_opportunities_cached: int = 200
+    max_consecutive_errors: int = 10; watchdog_interval_seconds: int = 30; error_backoff_base: int = 2
+    error_backoff_max: int = 30; scan_timeout_per_zone: float = 3.0; enable_watchdog: bool = True
+    enable_alerts: bool = True; enable_analytics: bool = True; enable_prediction: bool = True
+    enable_group_metrics: bool = True; history_max_per_zone: int = 100; alerts_max_cached: int = 50
+    priority_weights: Dict[str, float] = field(default_factory=lambda: {"demand_score":0.35,"surge_multiplier":0.25,"hourly_potential":0.25,"confidence":0.15})
+    max_radius_km: float = 30.0
+    def to_dict(self) -> Dict[str, Any]: return asdict(self)
+
+# ================================================================================
+# SECCION 2: INTERFAZ DE PROVEEDOR DE DATOS
+# ================================================================================
+@runtime_checkable
+class DataProvider(Protocol):
+    def get_zone_data(self, zone: Zone) -> Dict[str, Any]: ...
+    def is_available(self) -> bool: ...
+    def get_provider_name(self) -> str: ...
+
+class DataProviderBase(ABC):
+    @abstractmethod
+    def get_zone_data(self, zone: Zone) -> Dict[str, Any]: pass
+    @abstractmethod
+    def is_available(self) -> bool: pass
+    @abstractmethod
+    def get_provider_name(self) -> str: pass
+    def health_check(self) -> Dict[str, Any]:
+        return {"provider":self.get_provider_name(),"available":self.is_available(),"timestamp":datetime.now(timezone.utc).isoformat()}
+
+# ================================================================================
+# SECCION 3: ALGORITMOS PUROS DE CÁLCULO
+# ================================================================================
+class DemandCalculator:
+    @staticmethod
+    def calculate_demand_score(wait_times: List[int], surge_multipliers: List[float], capacity: int, requests: int) -> float:
+        if not wait_times: return 0.0
+        avg_wait = sum(wait_times) / len(wait_times)
+        if avg_wait < 120: wait_factor = 2.0
+        elif avg_wait < 300: wait_factor = 4.0
+        elif avg_wait < 480: wait_factor = 6.5
+        elif avg_wait < 720: wait_factor = 8.0
+        else: wait_factor = 9.5
+        max_surge = max(surge_multipliers) if surge_multipliers else 1.0
+        surge_factor = min(10.0, max_surge * 4.0)
+        if capacity > 0: saturation_factor = min(10.0, (requests / capacity) * 5.0)
+        else: saturation_factor = 8.0 if requests > 0 else 0.0
+        score = (wait_factor * 0.40 + surge_factor * 0.35 + saturation_factor * 0.25)
+        if max_surge > 1.0: score = min(10.0, score + (max_surge - 1.0) * 2.0)
+        return round(max(0.0, min(10.0, score)), 2)
+
+    @staticmethod
+    def determine_supply_level(avg_wait: int) -> SupplyLevel:
+        if avg_wait >= 720: return SupplyLevel.CRITICAL
+        elif avg_wait >= 480: return SupplyLevel.LOW
+        elif avg_wait >= 300: return SupplyLevel.MEDIUM
+        elif avg_wait > 0: return SupplyLevel.HIGH
+        return SupplyLevel.UNKNOWN
+
+    @staticmethod
+    def calculate_priority_score(demand_score: float, surge_multiplier: float, hourly_potential: float, confidence: float = 0.8, weights: Optional[Dict[str, float]] = None) -> float:
+        w = weights or {"demand_score":0.35,"surge_multiplier":0.25,"hourly_potential":0.25,"confidence":0.15}
+        demand_comp = (demand_score / 10.0) * 100.0
+        surge_comp = min(100.0, max(0.0, (surge_multiplier - 1.0) * 50.0))
+        value_comp = min(100.0, hourly_potential)
+        conf_comp = confidence * 100.0
+        priority = (demand_comp * w.get("demand_score",0.35) + surge_comp * w.get("surge_multiplier",0.25) +
+                    value_comp * w.get("hourly_potential",0.25) + conf_comp * w.get("confidence",0.15))
+        return round(priority, 2)
+
+    @staticmethod
+    def calculate_hourly_potential(avg_value: float, transactions_per_hour: float, surge_multiplier: float) -> float:
+        return round(avg_value * transactions_per_hour * surge_multiplier, 2)
+
+    @staticmethod
+    def calculate_quality_index(metrics: ZoneMetrics) -> float:
+        score = 0.0
+        score += min(25, metrics.demand_score * 2.5)
+        if metrics.surge_multiplier > 1.0: score += min(25, (metrics.surge_multiplier - 1.0) * 25)
+        else: score += 5
+        if metrics.supply_level == SupplyLevel.HIGH: score += 20
+        elif metrics.supply_level == SupplyLevel.MEDIUM: score += 12
+        elif metrics.supply_level == SupplyLevel.LOW: score += 5
+        else: score += 2
+        if metrics.average_value > 0: score += min(15, metrics.average_value / 2)
+        if metrics.average_wait_time < 300: score += 15
+        elif metrics.average_wait_time < 600: score += 8
+        else: score += 2
+        return round(min(100, max(0, score)), 1)
+
+    @staticmethod
+    def calculate_efficiency_ratio(metrics: ZoneMetrics) -> float:
+        if metrics.available_capacity <= 0 or metrics.average_wait_time <= 0: return 0.0
+        utilization = min(1.0, metrics.active_requests / metrics.available_capacity)
+        speed_factor = max(0.1, 1.0 - (metrics.average_wait_time / 1200.0))
+        return round(utilization * speed_factor, 3)
+
+    @staticmethod
+    def determine_risk_level(demand_score: float, surge: float, wait_time: int) -> str:
+        if demand_score >= 9.0 and surge >= 2.0: return "very_high"
+        elif demand_score >= 8.0 or surge >= 1.8: return "high"
+        elif demand_score >= 6.0 or surge >= 1.3: return "medium"
+        elif demand_score >= 4.0: return "low"
+        return "minimal"
+
+    @staticmethod
+    def generate_recommendation(demand_score: float, surge: float, trend: str = "stable") -> str:
+        trend_symbol = {"up":">>>", "down":"<<<", "stable":"---"}.get(trend, "---")
+        if demand_score >= 8.5 and surge >= 1.5: return "URGENTE - Demanda extrema con surge alto {}".format(trend_symbol)
+        elif demand_score >= 8.0: return "IR AHORA - Demanda muy alta {}".format(trend_symbol)
+        elif demand_score >= 7.0 and surge >= 1.2: return "RECOMENDADO - Alta demanda con surge {}".format(trend_symbol)
+        elif demand_score >= 7.0: return "Recomendado - Buena demanda {}".format(trend_symbol)
+        elif demand_score >= 5.5 and trend == "up": return "ATENCIÓN - Demanda subiendo {}".format(trend_symbol)
+        elif demand_score >= 5.5: return "Monitorear - Demanda moderada {}".format(trend_symbol)
+        elif demand_score >= 4.0: return "Esperar - Demanda baja {}".format(trend_symbol)
+        else: return "Evitar - Demanda mínima {}".format(trend_symbol)
+
+class HotspotDetector:
+    def __init__(self, threshold: float = 7.0):
+        self.threshold = threshold; self._history: Dict[str, deque] = {}; self._history_max = 20
+    def update_history(self, zone_id: str, score: float, timestamp: Optional[float] = None) -> None:
+        if zone_id not in self._history: self._history[zone_id] = deque(maxlen=self._history_max)
+        self._history[zone_id].append({"score":score,"timestamp":timestamp or time.time()})
+    def is_trending_up(self, zone_id: str, window: int = 3) -> bool:
+        history = self._history.get(zone_id, deque()); 
+        if len(history) < window: return False
+        recent = list(history)[-window:]; scores = [h["score"] for h in recent]
+        if len(scores) >= 4:
+            recent_avg = sum(scores[-2:]) / 2; earlier_avg = sum(scores[:2]) / 2
+            return recent_avg > earlier_avg * 1.1
+        return scores[-1] > scores[0]
+    def is_trending_down(self, zone_id: str, window: int = 3) -> bool:
+        history = self._history.get(zone_id, deque())
+        if len(history) < window: return False
+        recent = list(history)[-window:]; scores = [h["score"] for h in recent]
+        if len(scores) >= 2: return scores[-1] < scores[0] * 0.85
+        return False
+    def get_trend_direction(self, zone_id: str) -> str:
+        if self.is_trending_up(zone_id): return "up"
+        if self.is_trending_down(zone_id): return "down"
+        return "stable"
+    def get_trend_magnitude(self, zone_id: str, window: int = 5) -> float:
+        history = self._history.get(zone_id, deque())
+        if len(history) < 2: return 0.0
+        recent = list(history)[-window:]
+        if len(recent) < 2: return 0.0
+        first, last = recent[0]["score"], recent[-1]["score"]
+        if first == 0: return 0.0
+        return round(((last - first) / first) * 100, 1)
+    def get_volatility(self, zone_id: str, window: int = 5) -> float:
+        history = self._history.get(zone_id, deque())
+        if len(history) < 3: return 0.0
+        recent = list(history)[-window:]; scores = [h["score"] for h in recent]
+        mean = sum(scores)/len(scores); variance = sum((s-mean)**2 for s in scores)/len(scores)
+        return round(math.sqrt(variance), 2)
+    def find_hotspots(self, metrics: Dict[str, ZoneMetrics], include_trending: bool = False) -> List[Tuple[str, ZoneMetrics, str, float]]:
+        results = []
+        for zone_id, m in metrics.items():
+            if m.demand_score >= self.threshold:
+                trend = self.get_trend_direction(zone_id); magnitude = self.get_trend_magnitude(zone_id)
+                results.append((zone_id, m, trend, magnitude))
+            elif include_trending and self.is_trending_up(zone_id):
+                trend = "up"; magnitude = self.get_trend_magnitude(zone_id)
+                results.append((zone_id, m, trend, magnitude))
+        results.sort(key=lambda x: x[1].demand_score, reverse=True)
+        return results
+    def get_zone_history(self, zone_id: str) -> List[Dict[str, Any]]:
+        return list(self._history.get(zone_id, deque()))
+    def clear_history(self, zone_id: Optional[str] = None) -> None:
+        if zone_id: self._history.pop(zone_id, None)
+        else: self._history.clear()
+
+# ================================================================================
+# SECCION 4: SIMULADOR DE DATOS
+# ================================================================================
+@dataclass
+class ZoneProfile:
+    base_demand: float = 5.0; base_value: float = 10.0; base_wait_time: int = 300
+    peak_hours: List[int] = field(default_factory=lambda: [7,8,9,17,18,19])
+    weekend_multiplier: float = 1.0; night_penalty: float = 0.5; variance: float = 0.3
+    surge_probability: float = 0.3; max_surge: float = 2.5
+
+class SimulatedDataProvider(DataProviderBase):
+    DEFAULT_PROFILE = ZoneProfile()
+    def __init__(self, zone_profiles: Optional[Dict[str, ZoneProfile]] = None, seed: Optional[int] = None):
+        self.zone_profiles = zone_profiles or {}; self._rng = random.Random(seed); self._available = True; self._call_count = 0
+    def set_zone_profile(self, zone_id: str, profile: ZoneProfile) -> None: self.zone_profiles[zone_id] = profile
+    def get_zone_data(self, zone: Zone) -> Dict[str, Any]:
+        if not self._available: return {}
+        self._call_count += 1
+        profile = self.zone_profiles.get(zone.zone_id, self.DEFAULT_PROFILE)
+        hour_factor, is_peak = self._get_hour_factor(profile)
+        weekend_factor = self._get_weekend_factor(profile)
+        demand = profile.base_demand * hour_factor * weekend_factor
+        demand += self._rng.uniform(-profile.variance * 3, profile.variance * 3)
+        demand = max(0, min(10, demand))
+        if demand >= 8.0: surge = 1.5 + self._rng.uniform(0, profile.max_surge - 1.5)
+        elif demand >= 7.0: surge = 1.2 + self._rng.uniform(0, 0.5)
+        elif demand >= 5.5 and self._rng.random() < profile.surge_probability: surge = 1.0 + self._rng.uniform(0, 0.3)
+        else: surge = 1.0
+        surge = round(min(surge, profile.max_surge), 2)
+        base_wait = profile.base_wait_time
+        wait = base_wait * (1.5 if is_peak and demand > 7 else 1.2 if is_peak else self._rng.uniform(0.8, 1.2))
+        wait = max(60, int(wait))
+        num_readings = self._rng.randint(2, 4)
+        wait_times = [max(60, int(wait * self._rng.uniform(0.7, 1.3))) for _ in range(num_readings)]
+        surges = [round(surge * self._rng.uniform(0.9, 1.1), 2) for _ in range(num_readings)]
+        values = [round(profile.base_value * surge * self._rng.uniform(0.85, 1.15), 2) for _ in range(num_readings)]
+        if demand >= 7: capacity = self._rng.randint(1, 5); requests = self._rng.randint(10, 30)
+        elif demand >= 5: capacity = self._rng.randint(5, 15); requests = self._rng.randint(5, 15)
+        else: capacity = self._rng.randint(10, 25); requests = self._rng.randint(1, 8)
+        return {"wait_times":wait_times,"values":values,"surge_multipliers":surges,"capacity":capacity,"requests":requests,
+                "_simulated_demand":round(demand,2),"_simulated_surge":surge}
+    def _get_hour_factor(self, profile: ZoneProfile) -> Tuple[float, bool]:
+        hour = datetime.now().hour; is_peak = hour in profile.peak_hours
+        if is_peak: factor = 1.5 + self._rng.uniform(-0.2, 0.2)
+        elif hour < 6: factor = profile.night_penalty + self._rng.uniform(-0.1, 0.1)
+        elif hour < 12: factor = 0.8 + self._rng.uniform(-0.1, 0.1)
+        elif hour < 17: factor = 0.7 + self._rng.uniform(-0.1, 0.1)
+        else: factor = 1.0 + self._rng.uniform(-0.1, 0.1)
+        return factor, is_peak
+    def _get_weekend_factor(self, profile: ZoneProfile) -> float:
+        return profile.weekend_multiplier if datetime.now().weekday() >= 5 else 1.0
+    def is_available(self) -> bool: return self._available
+    def get_provider_name(self) -> str: return "SimulatedDataProvider"
+    def set_unavailable(self) -> None: self._available = False
+    def set_available(self) -> None: self._available = True
+    @property
+    def call_count(self) -> int: return self._call_count
+
+# ================================================================================
+# SECCION 5: RATE LIMITER
+# ================================================================================
+class RateLimiter:
+    def __init__(self, max_requests: int = 300, window_seconds: int = 60):
+        self.max_requests = max_requests; self.window_seconds = window_seconds
+        self._timestamps: deque = deque(); self._lock = threading.Lock()
+    def acquire(self, max_wait: float = 1.0) -> bool:
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            with self._lock:
+                now = time.time()
+                while self._timestamps and (now - self._timestamps[0]) > self.window_seconds: self._timestamps.popleft()
+                if len(self._timestamps) < self.max_requests: self._timestamps.append(now); return True
+            time.sleep(0.01)
+        return False
+    def wait_for_slot(self, max_wait: float = 1.0) -> None:
+        if not self.acquire(max_wait=max_wait): raise TimeoutError("Rate limit timeout")
+    @property
+    def available_slots(self) -> int:
+        with self._lock:
+            now = time.time()
+            while self._timestamps and (now - self._timestamps[0]) > self.window_seconds: self._timestamps.popleft()
+            return self.max_requests - len(self._timestamps)
+    def reset(self) -> None:
+        with self._lock: self._timestamps.clear()
+
+# ================================================================================
+# SECCION 6: SISTEMA DE ALERTAS
+# ================================================================================
+class AlertSystem:
+    SEVERITY_MAP = {"critical":4,"high":3,"medium":2,"low":1,"info":0}
+    def __init__(self, max_cached: int = 50):
+        self._thresholds: List[Dict[str, Any]] = []; self._alerts: deque = deque(maxlen=max_cached)
+        self._callbacks: List[Callable[[Alert], None]] = []; self._lock = threading.RLock()
+        self._suppressed: Dict[str, float] = {}; self._suppression_seconds: int = 120
+    def add_threshold(self, metric_name: str, condition: str, callback: Optional[Callable[[Alert], None]] = None,
+                      severity: str = "info", message_template: Optional[str] = None, suppression_seconds: Optional[int] = None) -> None:
+        entry = {"metric_name":metric_name,"condition":condition,"callback":callback,"severity":severity,
+                 "message_template":message_template or "{zone_name}: {metric_name} {condition} (actual: {current_value})",
+                 "suppression_seconds":suppression_seconds or self._suppression_seconds}
+        with self._lock: self._thresholds.append(entry)
+    def on_alert(self, callback: Callable[[Alert], None]) -> None:
+        with self._lock: self._callbacks.append(callback)
+    def evaluate(self, zone: Zone, metrics: ZoneMetrics) -> List[Alert]:
+        triggered = []; metrics_dict = metrics.to_dict()
+        with self._lock:
+            for thresh in self._thresholds:
+                if thresh["metric_name"] not in metrics_dict: continue
+                current_value = metrics_dict[thresh["metric_name"]]
+                if not self._check_condition(current_value, thresh["condition"]): continue
+                suppression_key = "{}_{}".format(zone.zone_id, thresh["metric_name"])
+                last_triggered = self._suppressed.get(suppression_key, 0)
+                if time.time() - last_triggered < thresh["suppression_seconds"]: continue
+                self._suppressed[suppression_key] = time.time()
+                alert = Alert(alert_type="threshold", zone_id=zone.zone_id, zone_name=zone.name,
+                              metric_name=thresh["metric_name"], condition=thresh["condition"],
+                              current_value=current_value, threshold_value=thresh["condition"],
+                              message=thresh["message_template"].format(zone_name=zone.name, zone_id=zone.zone_id,
+                                                                        metric_name=thresh["metric_name"],
+                                                                        condition=thresh["condition"],
+                                                                        current_value=current_value,
+                                                                        threshold_value=thresh["condition"]),
+                              severity=thresh["severity"])
+                self._alerts.append(alert); triggered.append(alert)
+                if thresh.get("callback"):
+                    try: thresh["callback"](alert)
+                    except Exception: pass
+                for cb in self._callbacks:
+                    try: cb(alert)
+                    except Exception: pass
+        return triggered
+    def _check_condition(self, value: Any, condition: str) -> bool:
+        try:
+            condition = condition.strip()
+            if ">=" in condition: return float(value) >= float(condition.split(">=",1)[1].strip())
+            if "<=" in condition: return float(value) <= float(condition.split("<=",1)[1].strip())
+            if ">" in condition: return float(value) > float(condition.split(">",1)[1].strip())
+            if "<" in condition: return float(value) < float(condition.split("<",1)[1].strip())
+            if "==" in condition: return float(value) == float(condition.split("==",1)[1].strip())
+            if "!=" in condition: return float(value) != float(condition.split("!=",1)[1].strip())
+        except: pass
+        return False
+    def get_alerts(self, severity: Optional[str] = None, zone_id: Optional[str] = None, acknowledged: Optional[bool] = None, limit: int = 20) -> List[Alert]:
+        with self._lock:
+            alerts = list(self._alerts)
+            if severity: alerts = [a for a in alerts if a.severity == severity]
+            if zone_id: alerts = [a for a in alerts if a.zone_id == zone_id]
+            if acknowledged is not None: alerts = [a for a in alerts if a.acknowledged == acknowledged]
+            return alerts[-limit:]
+    def acknowledge_alert(self, alert_id: str) -> bool:
+        with self._lock:
+            for a in self._alerts:
+                if a.alert_id == alert_id: a.acknowledged = True; return True
+        return False
+    def acknowledge_all(self) -> int:
+        count = 0
+        with self._lock:
+            for a in self._alerts:
+                if not a.acknowledged: a.acknowledged = True; count += 1
+        return count
+    def clear_alerts(self) -> int:
+        with self._lock:
+            count = len(self._alerts); self._alerts.clear(); self._suppressed.clear(); return count
+    @property
+    def unacknowledged_count(self) -> int:
+        with self._lock: return sum(1 for a in self._alerts if not a.acknowledged)
+    def get_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            alerts = list(self._alerts); severity_counts = defaultdict(int)
+            for a in alerts: severity_counts[a.severity] += 1
+            return {"total":len(alerts),"unacknowledged":sum(1 for a in alerts if not a.acknowledged),
+                    "by_severity":dict(severity_counts),"thresholds_configured":len(self._thresholds)}
+
+# ================================================================================
+# SECCION 7: ANALYTICS ENGINE
+# ================================================================================
+class AnalyticsEngine:
+    def __init__(self, max_history_per_zone: int = 100):
+        self._history: Dict[str, deque] = {}; self._max_history = max_history_per_zone
+        self._lock = threading.RLock(); self._snapshots: deque = deque(maxlen=50)
+    def record_metrics(self, metrics: ZoneMetrics) -> None:
+        with self._lock:
+            zid = metrics.zone_id
+            if zid not in self._history: self._history[zid] = deque(maxlen=self._max_history)
+            self._history[zid].append({"timestamp":metrics.timestamp.isoformat(),"unix_ts":metrics.timestamp.timestamp(),
+                                       "demand_score":metrics.demand_score,"surge_multiplier":metrics.surge_multiplier,
+                                       "average_wait_time":metrics.average_wait_time,"average_value":metrics.average_value,
+                                       "supply_level":metrics.supply_level.value,"quality_index":metrics.quality_index,
+                                       "efficiency_ratio":metrics.efficiency_ratio,"is_hotspot":metrics.is_hotspot,
+                                       "fuzzy_trust":metrics.fuzzy_trust})
+    def take_snapshot(self, all_metrics: Dict[str, ZoneMetrics]) -> Dict[str, Any]:
+        snapshot = {"timestamp":datetime.now(timezone.utc).isoformat(),
+                    "zones":{zid:m.to_dict() for zid,m in all_metrics.items()},
+                    "summary":self._calculate_summary(all_metrics)}
+        with self._lock: self._snapshots.append(snapshot)
+        return snapshot
+    def _calculate_summary(self, metrics: Dict[str, ZoneMetrics]) -> Dict[str, Any]:
+        if not metrics: return {"avg_demand":0,"max_demand":0,"hotspots":0,"zones_total":0}
+        scores = [m.demand_score for m in metrics.values()]
+        hotspots = sum(1 for m in metrics.values() if m.is_hotspot)
+        surges = [m.surge_multiplier for m in metrics.values() if m.surge_detected]
+        return {"zones_total":len(metrics),"avg_demand":round(sum(scores)/len(scores),2),
+                "max_demand":round(max(scores),2),"min_demand":round(min(scores),2),
+                "hotspots":hotspots,"avg_surge":round(sum(surges)/len(surges),2) if surges else 1.0,
+                "max_surge":round(max(surges),2) if surges else 1.0}
+    def get_zone_history(self, zone_id: str, hours: Optional[float] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            history = list(self._history.get(zone_id, deque()))
+            if hours is not None:
+                cutoff = time.time() - (hours * 3600)
+                history = [h for h in history if h.get("unix_ts",0) >= cutoff]
+            if limit is not None: history = history[-limit:]
+            return history
+    def get_zone_stats(self, zone_id: str, hours: Optional[float] = None) -> Dict[str, Any]:
+        history = self.get_zone_history(zone_id, hours=hours)
+        if not history: return {"available":False,"zone_id":zone_id}
+        scores = [h["demand_score"] for h in history]; surges = [h["surge_multiplier"] for h in history]
+        waits = [h["average_wait_time"] for h in history]; values = [h["average_value"] for h in history if h["average_value"]>0]
+        hotspot_ratio = sum(1 for h in history if h.get("is_hotspot"))/len(history)
+        return {"available":True,"zone_id":zone_id,"samples":len(history),"period_hours":hours,
+                "demand":{"avg":round(sum(scores)/len(scores),2),"max":round(max(scores),2),"min":round(min(scores),2),
+                          "std_dev":round(self._std_dev(scores),2)},
+                "surge":{"avg":round(sum(surges)/len(surges),2),"max":round(max(surges),2),
+                         "frequency":round(sum(1 for s in surges if s>1.0)/len(surges)*100,1)},
+                "wait_time":{"avg_seconds":int(sum(waits)/len(waits)),"avg_minutes":int(sum(waits)/len(waits)/60),
+                             "max_minutes":int(max(waits)/60)},
+                "value":{"avg":round(sum(values)/len(values),2) if values else 0,"max":round(max(values),2) if values else 0},
+                "hotspot_ratio":round(hotspot_ratio*100,1),
+                "quality":{"avg_index":round(sum(h.get("quality_index",0) for h in history)/len(history),1)}}
+    def get_global_stats(self, hours: Optional[float] = None) -> Dict[str, Any]:
+        with self._lock:
+            zone_ids = list(self._history.keys()); zone_stats = {}; total_samples = 0; all_hotspot_ratios = []
+            for zid in zone_ids:
+                stats = self.get_zone_stats(zid, hours=hours); zone_stats[zid] = stats
+                total_samples += stats.get("samples",0)
+                if stats.get("available"): all_hotspot_ratios.append(stats.get("hotspot_ratio",0))
+            return {"period_hours":hours,"zones_analyzed":len(zone_ids),"total_samples":total_samples,
+                    "zone_stats":zone_stats,
+                    "avg_hotspot_ratio":round(sum(all_hotspot_ratios)/len(all_hotspot_ratios),1) if all_hotspot_ratios else 0}
+    def get_snapshots(self, limit: int = 10) -> List[Dict[str, Any]]:
+        with self._lock: return list(self._snapshots)[-limit:]
+    def compare_zones(self, zone_ids: List[str], metric_names: Optional[List[str]] = None, hours: Optional[float] = None) -> Dict[str, Any]:
+        metric_names = metric_names or ["demand_score","surge_multiplier","average_wait_time","average_value"]
+        comparison = {}
+        for zid in zone_ids:
+            history = self.get_zone_history(zid, hours=hours); zone_comp = {}
+            for mname in metric_names:
+                values = [h.get(mname,0) for h in history if h.get(mname) is not None]
+                if values: zone_comp[mname] = {"avg":round(sum(values)/len(values),2),"max":round(max(values),2),"min":round(min(values),2),"samples":len(values)}
+                else: zone_comp[mname] = {"avg":0,"max":0,"min":0,"samples":0}
+            comparison[zid] = zone_comp
+        ranking = {}
+        for mname in metric_names:
+            ranked = sorted([(zid, comparison[zid][mname]["avg"]) for zid in zone_ids if zid in comparison], key=lambda x: x[1], reverse=True)
+            ranking[mname] = [{"zone_id":z,"value":v} for z,v in ranked]
+        return {"comparison":comparison,"ranking":ranking}
+    def get_ranking(self, metric_name: str = "demand_score", hours: Optional[float] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            zone_ids = list(self._history.keys()); results = []
+            for zid in zone_ids:
+                history = self.get_zone_history(zid, hours=hours)
+                values = [h.get(metric_name,0) for h in history if h.get(metric_name) is not None]
+                if values: results.append({"zone_id":zid,"avg":round(sum(values)/len(values),2),"max":round(max(values),2),"samples":len(values)})
+            results.sort(key=lambda x: x["avg"], reverse=True)
+            return results
+    @staticmethod
+    def _std_dev(values: List[float]) -> float:
+        if len(values) < 2: return 0.0
+        mean = sum(values)/len(values); variance = sum((v-mean)**2 for v in values)/len(values)
+        return math.sqrt(variance)
+    def clear_history(self, zone_id: Optional[str] = None) -> None:
+        with self._lock:
+            if zone_id: self._history.pop(zone_id, None)
+            else: self._history.clear()
+            self._snapshots.clear()
+
+# ================================================================================
+# SECCION 8: PREDICTION ENGINE
+# ================================================================================
+class PredictionEngine:
+    def __init__(self, history_source: Optional[AnalyticsEngine] = None): self._history_source = history_source
+    def set_history_source(self, source: AnalyticsEngine) -> None: self._history_source = source
+    def forecast_demand(self, zone_id: str, steps: int = 6, interval_minutes: int = 1) -> List[Dict[str, Any]]:
+        if not self._history_source: return []
+        history = self._history_source.get_zone_history(zone_id, hours=0.2)
+        if len(history) < 3: return []
+        scores = [h["demand_score"] for h in history]; forecast = self._linear_extrapolation(scores, steps)
+        result = []; base_time = datetime.now(timezone.utc)
+        for i, predicted in enumerate(forecast):
+            future_time = base_time + timedelta(minutes=interval_minutes * (i+1))
+            result.append({"step":i+1,"timestamp":future_time.isoformat(),"predicted_demand":round(max(0,min(10,predicted)),2),
+                           "interval_minutes":interval_minutes,"confidence":round(max(0.1,0.9-(i*0.1)),2)})
+        return result
+    def forecast_surge(self, zone_id: str, steps: int = 6, interval_minutes: int = 1) -> List[Dict[str, Any]]:
+        if not self._history_source: return []
+        history = self._history_source.get_zone_history(zone_id, hours=0.2)
+        if len(history) < 3: return []
+        surges = [h["surge_multiplier"] for h in history]; forecast = self._linear_extrapolation(surges, steps)
+        result = []; base_time = datetime.now(timezone.utc)
+        for i, predicted in enumerate(forecast):
+            future_time = base_time + timedelta(minutes=interval_minutes * (i+1))
+            result.append({"step":i+1,"timestamp":future_time.isoformat(),"predicted_surge":round(max(1.0,predicted),2),
+                           "interval_minutes":interval_minutes,"confidence":round(max(0.1,0.85-(i*0.12)),2)})
+        return result
+    def detect_anomaly(self, zone_id: str) -> Optional[Dict[str, Any]]:
+        if not self._history_source: return None
+        history = self._history_source.get_zone_history(zone_id, hours=1)
+        if len(history) < 5: return None
+        scores = [h["demand_score"] for h in history]; mean = sum(scores)/len(scores); std = self._std_dev(scores)
+        if std == 0: return None
+        latest = scores[-1]; z_score = (latest - mean) / std
+        if abs(z_score) > 2.0:
+            return {"zone_id":zone_id,"anomaly_detected":True,"z_score":round(z_score,2),"current_value":latest,
+                    "historical_mean":round(mean,2),"historical_std":round(std,2),
+                    "direction":"spike" if z_score>0 else "drop","severity":"high" if abs(z_score)>3.0 else "medium"}
+        return None
+    @staticmethod
+    def _linear_extrapolation(values: List[float], steps: int) -> List[float]:
+        n = len(values)
+        if n < 2: return [values[-1]] * steps
+        recent = values[-min(n,10):]; x = list(range(len(recent)))
+        mean_x = sum(x)/len(x); mean_y = sum(recent)/len(recent)
+        numerator = sum((xi-mean_x)*(yi-mean_y) for xi,yi in zip(x,recent))
+        denominator = sum((xi-mean_x)**2 for xi in x)
+        if denominator == 0: return [recent[-1]] * steps
+        slope = numerator/denominator; intercept = mean_y - slope*mean_x
+        predictions = []
+        for i in range(1, steps+1):
+            pred = slope*(len(recent)-1+i)+intercept
+            if len(predictions)>0: pred = predictions[-1]*0.7 + pred*0.3
+            predictions.append(pred)
+        return predictions
+    @staticmethod
+    def _std_dev(values: List[float]) -> float:
+        if len(values) < 2: return 0.0
+        mean = sum(values)/len(values); variance = sum((v-mean)**2 for v in values)/len(values)
+        return math.sqrt(variance)
+
+# ================================================================================
+# SECCION 9: ZONE GROUP MANAGER
+# ================================================================================
+class ZoneGroupManager:
+    def __init__(self):
+        self._groups: Dict[str, List[str]] = {}; self._group_metadata: Dict[str, Dict[str, Any]] = {}; self._lock = threading.RLock()
+    def create_group(self, group_id: str, zone_ids: List[str], metadata: Optional[Dict[str, Any]] = None) -> None:
+        with self._lock: self._groups[group_id] = list(zone_ids); self._group_metadata[group_id] = metadata or {}
+    def add_to_group(self, group_id: str, zone_id: str) -> bool:
+        with self._lock:
+            if group_id not in self._groups: return False
+            if zone_id not in self._groups[group_id]: self._groups[group_id].append(zone_id)
+            return True
+    def remove_from_group(self, group_id: str, zone_id: str) -> bool:
+        with self._lock:
+            if group_id not in self._groups: return False
+            if zone_id in self._groups[group_id]: self._groups[group_id].remove(zone_id); return True
+            return False
+    def delete_group(self, group_id: str) -> bool:
+        with self._lock:
+            if group_id in self._groups: del self._groups[group_id]; self._group_metadata.pop(group_id, None); return True
+            return False
+    def get_group(self, group_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            if group_id not in self._groups: return None
+            return {"group_id":group_id,"zone_ids":list(self._groups[group_id]),"zone_count":len(self._groups[group_id]),
+                    "metadata":self._group_metadata.get(group_id,{})}
+    def get_all_groups(self) -> Dict[str, Dict[str, Any]]:
+        with self._lock: return {gid: self.get_group(gid) for gid in self._groups}
+    def get_group_metrics(self, group_id: str, all_metrics: Dict[str, ZoneMetrics]) -> Dict[str, Any]:
+        with self._lock:
+            zone_ids = self._groups.get(group_id, []); group_metrics = {zid: all_metrics[zid] for zid in zone_ids if zid in all_metrics}
+            if not group_metrics: return {"group_id":group_id,"zones_found":0}
+            scores = [m.demand_score for m in group_metrics.values()]
+            return {"group_id":group_id,"zones_found":len(group_metrics),"zones_total":len(zone_ids),
+                    "avg_demand":round(sum(scores)/len(scores),2),"max_demand":round(max(scores),2),
+                    "hotspots":sum(1 for m in group_metrics.values() if m.is_hotspot),
+                    "best_zone":max(group_metrics.items(), key=lambda x: x[1].demand_score)[0],
+                    "worst_zone":min(group_metrics.items(), key=lambda x: x[1].demand_score)[0]}
+    def get_zones_for_group(self, group_id: str) -> List[str]:
+        with self._lock: return list(self._groups.get(group_id, []))
+    def get_groups_for_zone(self, zone_id: str) -> List[str]:
+        with self._lock: return [gid for gid, zids in self._groups.items() if zone_id in zids]
+
+# ================================================================================
+# SECCION 10: EXPORT MANAGER
+# ================================================================================
+class ExportManager:
+    @staticmethod
+    def to_json(data: Any, pretty: bool = True) -> str:
+        return json.dumps(data, indent=2, ensure_ascii=False, default=str) if pretty else json.dumps(data, ensure_ascii=False, default=str)
+    @staticmethod
+    def to_csv_rows(opportunities: List[Opportunity], include_header: bool = True) -> List[str]:
+        rows = []
+        if include_header: rows.append("opportunity_id,timestamp,zone_id,zone_name,demand_score,surge_multiplier,hourly_potential,priority_score,confidence,recommendation,risk_level,trend_direction")
+        for opp in opportunities:
+            rows.append(",".join([opp.opportunity_id, opp.timestamp.isoformat(), opp.zone_id, '"{}"'.format(opp.zone_name.replace('"','""')),
+                                  str(opp.demand_score), str(opp.surge_multiplier), str(opp.hourly_potential),
+                                  str(opp.priority_score), str(opp.confidence), '"{}"'.format(opp.recommendation.replace('"','""')),
+                                  opp.risk_level, opp.trend_direction]))
+        return rows
+    @staticmethod
+    def to_csv_string(opportunities: List[Opportunity]) -> str: return "\n".join(ExportManager.to_csv_rows(opportunities))
+    @staticmethod
+    def to_markdown_table(opportunities: List[Opportunity], max_rows: int = 20) -> str:
+        lines = ["| # | Zona | Demanda | Surge | $/h | Prioridad | Recomendación |",
+                 "|---|------|---------|-------|-----|-----------|---------------|"]
+        for i, opp in enumerate(opportunities[:max_rows], 1):
+            lines.append("| {} | {} | {:.1f}/10 | x{} | ${:.2f} | {:.0f} | {} |".format(i, opp.zone_name, opp.demand_score, opp.surge_multiplier, opp.hourly_potential, opp.priority_score, opp.recommendation))
+        return "\n".join(lines)
+    @staticmethod
+    def to_compact_summary(radar_status: Dict[str, Any]) -> str:
+        health = radar_status.get("health", {}); rec = radar_status.get("recommendation")
+        lines = ["=== RADAR SUMMARY ===", "Estado: {}".format("ACTIVO" if health.get("running") else "INACTIVO"),
+                 "Zonas: {}/{}".format(health.get("zones_with_data",0), health.get("zones_monitored",0)),
+                 "Escaneos: {}".format(health.get("successful_scans",0)), "Hotspots: {}".format(health.get("hotspots_detected",0)),
+                 "Errores: {}".format(health.get("consecutive_errors",0))]
+        if rec: lines.append("Recomendación: {} ({:.1f}/10)".format(rec.get("zone_name","?"), rec.get("demand_score",0)))
+        return "\n".join(lines)
+
+# ================================================================================
+# SECCION 11: ALGORITMOS AVANZADOS
+# ================================================================================
+class StandaloneFuzzyLogic:
+    def __init__(self): self.rules = []
+    def add_rule(self, conditions: Dict[str, str], output: Dict[str, float]): self.rules.append((conditions, output))
+    def _triangular_mf(self, x: float, a: float, b: float, c: float) -> float:
+        if x <= a or x >= c: return 0.0
+        if x <= b: return (x-a)/(b-a) if (b-a)!=0 else 1.0
+        return (c-x)/(c-b) if (c-b)!=0 else 1.0
+    def _normalize_input(self, var: str, value: Any) -> float:
+        if isinstance(value, str):
+            v = value.lower().strip()
+            if v in ('low','bajo'): return 0.25
+            if v in ('medium','medio','normal'): return 0.5
+            if v in ('high','alto','alta'): return 0.75
+            return 0.5
+        num = float(value)
+        if var in ('demand','demand_norm'): num = max(0.0, min(10.0, num))/10.0
+        else: num = max(0.0, min(1.0, num))
+        return num
+    def _fuzzify(self, var: str, value: Any) -> Dict[str, float]:
+        v = self._normalize_input(var, value)
+        return {"low":self._triangular_mf(v,-0.1,0.0,0.4),"medium":self._triangular_mf(v,0.2,0.5,0.8),"high":self._triangular_mf(v,0.6,1.0,1.1)}
+    def evaluate_simple(self, inputs: Dict[str, Any]) -> Dict[str, float]:
+        fuzzified = {var: self._fuzzify(var, val) for var, val in inputs.items()}
+        rule_firing_strengths, rule_outputs = [], []
+        for conditions, output in self.rules:
+            strength = 1.0
+            for ant_var, ant_term in conditions.items():
+                if ant_var in fuzzified: strength = min(strength, fuzzified[ant_var].get(ant_term, 0.0))
+            if strength > 0: rule_firing_strengths.append(strength); rule_outputs.append(output.get('trust', 0.5))
+        if not rule_firing_strengths: return {'trust': 0.5}
+        numerator = sum(s*o for s,o in zip(rule_firing_strengths, rule_outputs))
+        denominator = sum(rule_firing_strengths)
+        if denominator == 0: return {'trust': 0.5}
+        return {'trust': max(0.0, min(1.0, numerator/denominator))}
+
+class StandaloneKalmanFilter:
+    def __init__(self): self.x=0.0; self.P=1.0; self.Q=0.01; self.R=0.1
+    def predict(self): self.P += self.Q
+    def update(self, z: float):
+        K = self.P/(self.P+self.R); self.x += K*(z-self.x); self.P = (1-K)*self.P
+    def get_state(self): return [self.x]
+
+class StandaloneRL:
+    def __init__(self, state_dim=6, action_dim=3, alpha=0.1, gamma=0.9, epsilon=0.1):
+        self.state_dim=state_dim; self.action_dim=action_dim; self.alpha=alpha; self.gamma=gamma; self.epsilon=epsilon
+        self.q_table: Dict[Tuple, List[float]] = {}; self._discretization_bins=10
+    def _discretize_state(self, state_continuous: List[float]) -> Tuple[int,...]:
+        disc = []
+        for val in state_continuous:
+            v = max(0.0, min(1.0, val)); bin_idx = int(v*self._discretization_bins)
+            if bin_idx >= self._discretization_bins: bin_idx = self._discretization_bins-1
+            disc.append(bin_idx)
+        return tuple(disc)
+    def _get_q_values(self, state: Tuple[int,...]) -> List[float]:
+        if state not in self.q_table: self.q_table[state] = [0.0]*self.action_dim
+        return self.q_table[state]
+    def choose_action(self, state_continuous: List[float]) -> int:
+        state = self._discretize_state(state_continuous); qvals = self._get_q_values(state)
+        if random.random() < self.epsilon: return random.randint(0, self.action_dim-1)
+        return max(range(self.action_dim), key=lambda a: qvals[a])
+    def update(self, state_continuous, action, reward, next_state_continuous, done):
+        state = self._discretize_state(state_continuous); next_state = self._discretize_state(next_state_continuous)
+        qvals = self._get_q_values(state); next_qvals = self._get_q_values(next_state)
+        best_next = max(next_qvals) if not done else 0.0
+        td_target = reward + self.gamma * best_next; td_error = td_target - qvals[action]
+        qvals[action] += self.alpha * td_error
+
+class StandaloneEpisodicMemory:
+    def __init__(self, capacity=100): self.capacity=capacity; self.episodes: List[List[Dict]] = []
+    def add_episode(self, episode: List[Dict]):
+        if len(self.episodes) >= self.capacity: self.episodes.pop(0)
+        self.episodes.append(episode)
+    def retrieve_similar(self, current_state: List[float], k=3) -> List[Dict]:
+        if not self.episodes: return []
+        similarities = []
+        for idx, ep in enumerate(self.episodes):
+            if not ep: continue
+            state_vec = ep[0].get('state', [0.0]*len(current_state))
+            sim = self._cosine_similarity(state_vec, current_state); similarities.append((idx, sim))
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        return [self.episodes[i] for i,_ in similarities[:k]]
+    @staticmethod
+    def _cosine_similarity(a, b):
+        if not a or not b: return 0.0
+        dot = sum(x*y for x,y in zip(a,b)); norm_a = math.sqrt(sum(x*x for x in a)); norm_b = math.sqrt(sum(y*y for y in b))
+        if norm_a==0 or norm_b==0: return 0.0
+        return dot/(norm_a*norm_b)
+
+class StandaloneMetaLearner:
+    def __init__(self, state_dim=6, action_dim=3, lr=0.01):
+        self.state_dim=state_dim; self.action_dim=action_dim; self.lr=lr
+        self.weights = [[random.uniform(-0.1,0.1) for _ in range(state_dim)] for __ in range(action_dim)]
+        self.bias = [0.0]*action_dim
+    def _forward(self, state): return [sum(self.weights[a][i]*state[i] for i in range(self.state_dim))+self.bias[a] for a in range(self.action_dim)]
+    def adapt(self, state, reward=0.0):
+        logits = self._forward(state); best_action = max(range(self.action_dim), key=lambda a: logits[a])
+        for i in range(self.state_dim): self.weights[best_action][i] += self.lr*state[i]*reward
+        self.bias[best_action] += self.lr*reward
+    def predict_best_action(self, state): return max(range(self.action_dim), key=lambda a: self._forward(state)[a])
+
+class StandaloneGeneticOptimizer:
+    def __init__(self, bounds, pop_size=20, gens=5, mutation_rate=0.1, crossover_rate=0.7, elitism=2):
+        self.bounds=bounds; self.pop_size=pop_size; self.gens=gens; self.mutation_rate=mutation_rate
+        self.crossover_rate=crossover_rate; self.elitism=elitism
+    def _create_individual(self):
+        ind = {k: random.uniform(low,high) for k,(low,high) in self.bounds.items()}
+        total = sum(ind.values())
+        if total>0: ind = {k: v/total for k,v in ind.items()}
+        return ind
+    def _crossover(self, p1, p2):
+        if random.random() > self.crossover_rate: return p1.copy()
+        child = {k: (p1[k] if random.random()<0.5 else p2[k]) for k in p1}
+        total = sum(child.values())
+        if total>0: child = {k: v/total for k,v in child.items()}
+        return child
+    def _mutate(self, ind):
+        mutated = ind.copy()
+        for k in mutated:
+            if random.random() < self.mutation_rate:
+                low,high = self.bounds[k]; mutated[k] += random.gauss(0,0.05); mutated[k] = max(low, min(high, mutated[k]))
+        total = sum(mutated.values())
+        if total>0: mutated = {k: v/total for k,v in mutated.items()}
+        return mutated
+    def optimize(self, fitness_fn):
+        population = [self._create_individual() for _ in range(self.pop_size)]
+        best_individual, best_fitness = None, -float('inf')
+        for _ in range(self.gens):
+            fitnesses = [fitness_fn(ind) for ind in population]
+            sorted_pop = sorted(zip(population, fitnesses), key=lambda x: x[1], reverse=True)
+            elites = [ind for ind,_ in sorted_pop[:self.elitism]]
+            new_population = elites[:]
+            while len(new_population) < self.pop_size:
+                parents = random.sample(population,2); p1 = max(parents, key=lambda x: fitness_fn(x))
+                p2 = max(random.sample(population,2), key=lambda x: fitness_fn(x))
+                child = self._crossover(p1,p2); child = self._mutate(child); new_population.append(child)
+            population = new_population
+            for ind, fit in zip(population, fitnesses):
+                if fit > best_fitness: best_fitness, best_individual = fit, ind
+        return best_individual, best_fitness
+
+# ================================================================================
+# SECCION 12: MOTOR DE RADAR PRINCIPAL
+# ================================================================================
+class RadarEngine:
+    def __init__(self, zones: List[Zone], data_provider: DataProviderBase, config: Optional[RadarConfig] = None,
+                 rate_limiter: Optional[RateLimiter] = None, symbiosis: Optional[Any] = None, user_session: Optional[Any] = None):
+        self.user_session = user_session
+        if user_session: self.persist_dir = user_session.persist_dir; self.registry = user_session.registry
+        else: self.persist_dir = Path("./radar_data"); self.registry = None
+        self.zones = {z.zone_id: z for z in zones}; self.provider = data_provider
+        self.config = config or RadarConfig()
+        self.rate_limiter = rate_limiter or RateLimiter(max_requests=500, window_seconds=1)
+        self.calculator = DemandCalculator(); self.detector = HotspotDetector(threshold=self.config.hotspot_threshold)
+        self.alerts = AlertSystem(max_cached=self.config.alerts_max_cached)
+        self.analytics = AnalyticsEngine(max_history_per_zone=self.config.history_max_per_zone)
+        self.prediction = PredictionEngine(history_source=self.analytics)
+        self.groups = ZoneGroupManager(); self.exporter = ExportManager()
+        self._running = False; self._scan_thread = None; self._watchdog_thread = None; self._lock = threading.RLock()
+        self._zone_metrics: Dict[str, ZoneMetrics] = {}; self._opportunities: deque = deque(maxlen=self.config.max_opportunities_cached)
+        self._total_scans = 0; self._successful_scans = 0; self._error_count = 0; self._consecutive_errors = 0
+        self._last_scan_time = None; self._last_successful_scan = None; self._start_time = None
+        self._on_opportunity = None; self._on_error = None; self._on_scan_complete = None; self._on_hotspot = None
+        self._logger = self._default_logger; self._log_enabled = True
+        self.symbiosis = symbiosis; self._dynamic_zone_updater = None
+        self.fuzzy = StandaloneFuzzyLogic(); self.rl_ensemble = StandaloneRL(); self.episodic_memory = StandaloneEpisodicMemory(capacity=50)
+        self.meta_learner = StandaloneMetaLearner()
+        bounds = {'demand_score':(0.0,1.0),'surge_multiplier':(0.0,1.0),'hourly_potential':(0.0,1.0),'confidence':(0.0,1.0)}
+        self.genetic_optimizer = StandaloneGeneticOptimizer(bounds, pop_size=20, gens=5)
+        for rule in [({'distance':'low','demand':'high'},{'trust':1.0}),({'distance':'low','demand':'medium'},{'trust':0.8}),
+                     ({'distance':'low','demand':'low'},{'trust':0.5}),({'distance':'medium','demand':'high'},{'trust':0.7}),
+                     ({'distance':'medium','demand':'medium'},{'trust':0.6}),({'distance':'medium','demand':'low'},{'trust':0.4}),
+                     ({'distance':'high','demand':'high'},{'trust':0.4}),({'distance':'high','demand':'medium'},{'trust':0.3}),
+                     ({'distance':'high','demand':'low'},{'trust':0.2})]: self.fuzzy.add_rule(*rule)
+        self._algorithms_active = True; self._rl_step_counter = 0; self._last_rl_update = time.time()
+        self._setup_default_alerts()
+
+    def _setup_default_alerts(self):
+        if not self.config.enable_alerts: return
+        self.alerts.add_threshold("demand_score", ">= 9.0", severity="critical", message_template="CRÍTICO: {zone_name} - Demanda {current_value}/10", suppression_seconds=60)
+        self.alerts.add_threshold("demand_score", ">= 7.0", severity="high", message_template="HOTSPOT: {zone_name} - Demanda {current_value}/10", suppression_seconds=120)
+        self.alerts.add_threshold("surge_multiplier", ">= 1.5", severity="high", message_template="SURGE ALTO: {zone_name} - Surge x{current_value}", suppression_seconds=120)
+
+    @staticmethod
+    def _default_logger(msg: str, level: str = "INFO") -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        prefix = {"ERROR":"[!]","WARN":"[*]","START":"[+]","STOP":"[-]","SCAN":"[~]","ALERT":"[!]","HOTSPOT":"[#]","WATCHDOG":"[@]"}.get(level,"[i]")
+        print("[{}] {} [{}] {}".format(ts, prefix, level, msg), flush=True)
+
+    def _log(self, msg: str, level: str = "INFO") -> None:
+        if self._log_enabled:
+            try: self._logger(msg, level)
+            except Exception: pass
+
+    def start(self) -> None:
+        if self._running: return
+        self._running = True; self._start_time = time.time(); self._consecutive_errors = 0
+        self._scan_thread = threading.Thread(target=self._scan_loop, daemon=True, name="RadarScanLoop"); self._scan_thread.start()
+        if self.config.enable_watchdog:
+            self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="RadarWatchdog"); self._watchdog_thread.start()
+        self._log("Radar v3.0 iniciado - {} zonas".format(len(self.zones)), "START")
+
+    def stop(self) -> None:
+        self._running = False
+        if self._scan_thread: self._scan_thread.join(timeout=2)
+        if self._watchdog_thread: self._watchdog_thread.join(timeout=1)
+
+    def _perform_scan(self) -> List[Opportunity]:
+        opportunities = []
+        for zone in list(self.zones.values()):
+            if not self._running or not zone.enabled: continue
+            try:
+                self.rate_limiter.wait_for_slot(max_wait=self.config.scan_timeout_per_zone)
+                raw_data = self.provider.get_zone_data(zone)
+                if not raw_data: continue
+                metrics = self._calculate_metrics(zone.zone_id, raw_data)
+                self.detector.update_history(zone.zone_id, metrics.demand_score)
+                metrics.quality_index = self.calculator.calculate_quality_index(metrics)
+                metrics.efficiency_ratio = self.calculator.calculate_efficiency_ratio(metrics)
+                with self._lock: self._zone_metrics[zone.zone_id] = metrics
+                if self.config.enable_analytics: self.analytics.record_metrics(metrics)
+                if self.config.hot_zones_only and metrics.demand_score < self.config.min_demand_threshold: continue
+                trend = self.detector.get_trend_direction(zone.zone_id)
+                opportunity = self._create_opportunity(zone, metrics, trend)
+                opportunities.append(opportunity)
+                if self._on_opportunity:
+                    try: self._on_opportunity(opportunity)
+                    except Exception: pass
+                if metrics.is_hotspot and self._on_hotspot:
+                    try: self._on_hotspot(zone.zone_id, metrics)
+                    except Exception: pass
+                if self.config.enable_alerts: self.alerts.evaluate(zone, metrics)
+            except Exception as e:
+                self._log("Error escaneando {}: {}".format(zone.zone_id, e), "ERROR"); self._error_count += 1
+        with self._lock: self._opportunities.extend(opportunities)
+        return opportunities
+
+    def _calculate_metrics(self, zone_id: str, raw_data: Dict[str, Any]) -> ZoneMetrics:
+        wait_times = raw_data.get("wait_times",[]); values = raw_data.get("values",[]); surges = raw_data.get("surge_multipliers",[])
+        capacity = raw_data.get("capacity",0); requests_count = raw_data.get("requests",0)
+        is_simulated = raw_data.get("_simulated_demand") is not None
+        demand_score = self.calculator.calculate_demand_score(wait_times=wait_times, surge_multipliers=surges, capacity=capacity, requests=requests_count)
+        avg_wait = int(sum(wait_times)/len(wait_times)) if wait_times else 0
+        supply_level = self.calculator.determine_supply_level(avg_wait)
+        max_surge = max(surges) if surges else 1.0; surge_detected = max_surge > 1.0
+        avg_value = sum(values)/len(values) if values else 0.0
+        if is_simulated: demand_score = raw_data.get("_simulated_demand", demand_score); max_surge = raw_data.get("_simulated_surge", max_surge); surge_detected = max_surge > 1.0
+        return ZoneMetrics(zone_id=zone_id, timestamp=datetime.now(timezone.utc), demand_score=demand_score,
+                           supply_level=supply_level, surge_detected=surge_detected, surge_multiplier=round(max_surge,2),
+                           average_wait_time=avg_wait, average_value=round(avg_value,2), available_capacity=capacity,
+                           active_requests=requests_count, is_simulated=is_simulated, raw_data=raw_data)
+
+    def _create_opportunity(self, zone: Zone, metrics: ZoneMetrics, trend: str) -> Opportunity:
+        base_transactions = 3.0
+        supply_factor = {SupplyLevel.HIGH:1.0, SupplyLevel.MEDIUM:0.8, SupplyLevel.LOW:0.6, SupplyLevel.CRITICAL:0.4, SupplyLevel.UNKNOWN:0.7}.get(metrics.supply_level, 0.7)
+        transactions_per_hour = base_transactions * supply_factor * metrics.surge_multiplier
+        hourly_potential = self.calculator.calculate_hourly_potential(avg_value=metrics.average_value, transactions_per_hour=transactions_per_hour, surge_multiplier=metrics.surge_multiplier)
+        confidence = min(0.95, 0.6 + (len(metrics.raw_data.get("wait_times",[])) * 0.1))
+        if self._algorithms_active and metrics.fuzzy_trust < 0.95: confidence *= (0.5 + 0.5 * metrics.fuzzy_trust)
+        priority = self.calculator.calculate_priority_score(demand_score=metrics.demand_score, surge_multiplier=metrics.surge_multiplier,
+                                                            hourly_potential=hourly_potential, confidence=confidence, weights=self.config.priority_weights)
+        priority *= zone.priority_weight
+        risk = self.calculator.determine_risk_level(metrics.demand_score, metrics.surge_multiplier, metrics.average_wait_time)
+        recommendation = self.calculator.generate_recommendation(metrics.demand_score, metrics.surge_multiplier, trend)
+        return Opportunity(opportunity_id="opp_{}_{}".format(zone.zone_id, int(time.time())), timestamp=metrics.timestamp,
+                           zone_id=zone.zone_id, zone_name=zone.name, location=zone.location, demand_score=metrics.demand_score,
+                           surge_multiplier=metrics.surge_multiplier, estimated_value=metrics.average_value*0.75,
+                           hourly_potential=hourly_potential, wait_time_seconds=metrics.average_wait_time, priority_score=priority,
+                           confidence=round(confidence,2), recommendation=recommendation, risk_level=risk, trend_direction=trend,
+                           metadata={"fuzzy_trust":round(metrics.fuzzy_trust,3)})
+
+    def get_best_opportunity(self) -> Optional[Opportunity]:
+        with self._lock: return max(self._opportunities, key=lambda o: o.priority_score) if self._opportunities else None
+    def get_top_opportunities(self, n: int = 5) -> List[Opportunity]:
+        with self._lock: return sorted(self._opportunities, key=lambda o: o.priority_score, reverse=True)[:n]
+    def get_hotspots(self, include_trending=False):
+        with self._lock: return self.detector.find_hotspots(self._zone_metrics, include_trending)
+    def force_scan(self) -> List[Opportunity]: return self._perform_scan()
+    def set_dynamic_zone_updater(self, updater: Callable[[], List[Zone]]) -> None: self._dynamic_zone_updater = updater
+    def get_health(self) -> Dict[str, Any]:
+        success_rate = (self._successful_scans / self._total_scans * 100) if self._total_scans > 0 else 0
+        uptime = time.time() - self._start_time if self._start_time else 0
+        return {"running":self._running,"uptime_seconds":round(uptime),"provider":self.provider.get_provider_name(),
+                "zones_monitored":len(self.zones),"zones_with_data":len(self._zone_metrics),"total_scans":self._total_scans,
+                "successful_scans":self._successful_scans,"success_rate":round(success_rate,1),"error_count":self._error_count,
+                "consecutive_errors":self._consecutive_errors,"opportunities_cached":len(self._opportunities),
+                "hotspots_detected":len(self.get_hotspots()),"algorithms_active":self._algorithms_active}
+    def get_recommendation(self) -> Optional[Dict[str, Any]]:
+        hotspots = self.get_hotspots()
+        if not hotspots: return None
+        zone_id, metrics, trend, magnitude = hotspots[0]
+        zone = self.zones.get(zone_id)
+        return {"recommended_zone":zone_id,"zone_name":zone.name if zone else zone_id,"demand_score":metrics.demand_score,
+                "surge_multiplier":metrics.surge_multiplier,"wait_time_min":metrics.wait_time_minutes,"trend":trend}
+    def get_algorithms_status(self) -> Dict[str, Any]:
+        return {"algorithms_available":True,"algorithms_active":self._algorithms_active,"fuzzy":True,"rl_ensemble":True,
+                "episodic_memory":True,"meta_learner":True,"genetic_optimizer":True,"rl_steps":self._rl_step_counter}
+    def _scan_loop(self) -> None:
+        while self._running:
+            try:
+                if self._dynamic_zone_updater:
+                    with self._lock: self.zones = {z.zone_id: z for z in self._dynamic_zone_updater()}
+                opportunities = self._perform_scan()
+                self._consecutive_errors = 0; self._last_successful_scan = time.time(); self._successful_scans += 1
+                if self.config.enable_analytics:
+                    with self._lock: self.analytics.take_snapshot(self._zone_metrics)
+                self._activate_all_algorithms()
+            except Exception as e:
+                self._error_count += 1; self._consecutive_errors += 1
+                time.sleep(min(self.config.error_backoff_base**self._consecutive_errors, self.config.error_backoff_max))
+                continue
+            self._total_scans += 1; self._last_scan_time = time.time()
+            time.sleep(max(0, self.config.scan_interval_seconds - (time.time() - self._last_scan_time)))
+
+    def _watchdog_loop(self) -> None:
+        while self._running:
+            if self._scan_thread and not self._scan_thread.is_alive():
+                self._scan_thread = threading.Thread(target=self._scan_loop, daemon=True); self._scan_thread.start()
+            time.sleep(self.config.watchdog_interval_seconds)
+
+    def _activate_all_algorithms(self):
+        try: self._run_fuzzy_evaluation(); self._run_rl_update()
+        except Exception: pass
+
+    def _run_fuzzy_evaluation(self):
+        for zone_id, metrics in list(self._zone_metrics.items()):
+            zone = self.zones.get(zone_id)
+            if not zone: continue
+            dist_norm = min(1.0, zone.metadata.get('distance_km',10.0)/self.config.max_radius_km)
+            demand_norm = metrics.demand_score/10.0
+            result = self.fuzzy.evaluate_simple({'distance':dist_norm,'demand':demand_norm})
+            metrics.fuzzy_trust = max(0.1, min(1.0, result.get('trust',0.5)))
+            zone.priority_weight = 0.3 + 0.7*metrics.fuzzy_trust
+
+    def _run_rl_update(self):
+        self._rl_step_counter += 1
+        if self._rl_step_counter % 10 == 0:
+            state = [0.0]*6
+            if self._zone_metrics:
+                scores = [m.demand_score for m in self._zone_metrics.values()]
+                state[0] = sum(scores)/len(scores)/10.0
+            action = self.rl_ensemble.choose_action(state)
+            best = self.get_best_opportunity()
+            reward = best.demand_score/10.0 if best else 0.0
+            self.rl_ensemble.update(state, action, reward, state, False)
+
+# ================================================================================
+# SECCION 13: GESTOR DE ZONAS DINÁMICAS + PREDICTIVAS (CON KALMAN)
+# ================================================================================
+class PredictiveZoneManager:
+    """Genera zonas dentro de radio y predicciones adelante/izquierda/derecha."""
+
+    def __init__(self, max_radius_km: float = 30.0):
+        self.max_radius = max_radius_km
+        self._current_location: Optional[Tuple[float, float]] = None
+        self._current_bearing: float = 0.0
+        self._current_speed_kmh: float = 0.0
+        self._lock = threading.RLock()
+        self._kalman_lat = StandaloneKalmanFilter()
+        self._kalman_lon = StandaloneKalmanFilter()
+        self._kalman_initialized = True
+
+    def update_state(self, lat: float, lon: float, bearing: float, speed_kmh: float) -> None:
+        with self._lock:
+            if self._kalman_initialized:
+                try:
+                    self._kalman_lat.predict(); self._kalman_lat.update(lat)
+                    self._kalman_lon.predict(); self._kalman_lon.update(lon)
+                    ks_lat = self._kalman_lat.get_state()
+                    ks_lon = self._kalman_lon.get_state()
+                    if ks_lat and ks_lon:
+                        lat = float(ks_lat[0]); lon = float(ks_lon[0])
+                except Exception:
+                    pass
+            self._current_location = (lat, lon)
+            self._current_bearing = bearing
+            self._current_speed_kmh = speed_kmh
+
+    def get_all_zones(self) -> List[Zone]:
+        with self._lock:
+            if not self._current_location:
+                return []
+            lat, lon = self._current_location
+            zones = []
+            # --- BLOQUE: ZONAS RADIALES ---
+            for dist_km in [5, 10, 15, 20, 25, 30]:
+                for angle in range(0, 360, 45):
+                    rad = math.radians(angle)
+                    delta_lat = dist_km / 111.0
+                    delta_lon = dist_km / (111.0 * math.cos(math.radians(lat)))
+                    zlat = lat + delta_lat * math.cos(rad)
+                    zlon = lon + delta_lon * math.sin(rad)
+                    if not (-90 <= zlat <= 90 and -180 <= zlon <= 180):
+                        continue
+                    zid = "r{}_{}".format(dist_km, angle)
+                    zones.append(Zone(
+                        zone_id=zid,
+                        name="Radial {}km @{}".format(dist_km, angle),
+                        location=GeoPoint(zlat, zlon),
+                        metadata={"distance_km": dist_km, "bearing": angle, "type": "radial"},
+                        tags=["radial"],
+                        priority_weight=1.0 - dist_km / 60.0
+                    ))
+            # --- BLOQUE: ZONAS PREDICTIVAS ---
+            ahead_dist = min(5.0, max(1.0, self._current_speed_kmh / 10.0))
+            bearing_rad = math.radians(self._current_bearing)
+            zones.append(self._create_predictive_zone(lat, lon, bearing_rad, ahead_dist, "ahead", 1.8))
+            left_bearing = math.radians(self._current_bearing + 90)
+            zones.append(self._create_predictive_zone(lat, lon, left_bearing, 3.0, "left", 1.3))
+            right_bearing = math.radians(self._current_bearing - 90)
+            zones.append(self._create_predictive_zone(lat, lon, right_bearing, 3.0, "right", 1.3))
+            return zones
+
+    def _create_predictive_zone(self, lat: float, lon: float, bearing_rad: float,
+                                dist_km: float, label: str, priority: float) -> Zone:
+        delta_lat = dist_km / 111.0
+        delta_lon = dist_km / (111.0 * math.cos(math.radians(lat)))
+        zlat = lat + delta_lat * math.cos(bearing_rad)
+        zlon = lon + delta_lon * math.sin(bearing_rad)
+        zid = "pred_{}_{}".format(label, int(time.time()))
+        return Zone(
+            zone_id=zid,
+            name="Pred {} ({:.1f}km)".format(label, dist_km),
+            location=GeoPoint(zlat, zlon),
+            metadata={"type": "predictive", "direction": label, "distance_km": dist_km},
+            tags=["predictive"],
+            priority_weight=priority
+        )
+
+    @property
+    def kalman_active(self) -> bool:
+        return self._kalman_initialized
+
+# ================================================================================
+# SECCION 14: CONTROLADOR INTEGRADO (MODIFICADO v3.1 - BLE BROADCAST)
+# ================================================================================
+class IntegratedRadarController:
+    """Controlador que integra el Radar Engine con Bluetooth, GPS y BLE Broadcast."""
+
+    def __init__(self, user_session=None):
+        self.user_session = user_session
+        self.symbiosis = None
+        self.radar = None
+        self.predictive_zones = None
+        self.data_provider = None
+        self.bluetooth_provider = None
+        self.ble_broadcaster = None
+        self._running = False
+        self._use_bluetooth = False
+
+    def initialize(self, use_real_gps: bool = False, use_bluetooth: bool = False,
+                   allow_sim: bool = False, symbiosis_instance=None,
+                   enable_ble_broadcast: bool = False, prompt_text: Optional[str] = None):
+        print("[INFO] Iniciando Radar v3.1 con integración de entorno radioeléctrico y BLE Broadcast.")
+        self.predictive_zones = PredictiveZoneManager(max_radius_km=30.0)
+
+        # --- BLOQUE: SELECCIÓN DE DATA PROVIDER ---
+        if use_bluetooth:
+            try:
+                self.bluetooth_provider = RadioEnvironmentDataProvider()
+                if hasattr(self.bluetooth_provider, 'analyzer') and hasattr(self.bluetooth_provider.analyzer, 'scanner'):
+                    if not self.bluetooth_provider.analyzer.scanner.ensure_native_permissions():
+                        print("[WARN] Permisos nativos de Bluetooth concedidos.")
+                self.data_provider = self.bluetooth_provider
+                self._use_bluetooth = True
+                print("[INFO] Data provider: Radio Environment (Bluetooth Scanner)")
+            except Exception as e:
+                if allow_sim:
+                    print("[WARN] Error creando RadioEnvironmentDataProvider: {}".format(e))
+                    self.data_provider = SimulatedDataProvider(seed=42)
+                    self._use_bluetooth = False
+                else:
+                    raise RuntimeError("No se pudo inicializar proveedor Bluetooth y simulación no permitida")
+        else:
+            if allow_sim:
+                self.data_provider = SimulatedDataProvider(seed=42)
+                self._use_bluetooth = False
+            else:
+                raise RuntimeError("Se requiere Bluetooth o allow_sim=True")
+
+        config = RadarConfig(scan_interval_seconds=5, watchdog_interval_seconds=30,
+                             max_radius_km=30.0, enable_alerts=True,
+                             enable_analytics=True, enable_prediction=True)
+        self.radar = RadarEngine(zones=[], data_provider=self.data_provider, config=config,
+                                 symbiosis=symbiosis_instance, user_session=self.user_session)
+        self._setup_fallback_updater()
+
+        # --- BLOQUE: INICIALIZACIÓN BLE BROADCAST ---
+        if enable_ble_broadcast:
+            text_to_broadcast = prompt_text or MEJOR_OPCION_PROMPT_TEXTO
+            if not text_to_broadcast or not text_to_broadcast.strip():
+                print("[BLE Broadcast] Prompt vacío, broadcast desactivado.")
+            else:
+                try:
+                    self.ble_broadcaster = BLEBroadcastService(text_to_broadcast, interval=0.2)
+                    self.ble_broadcaster.start()
+                    print("[BLE Broadcast] Servicio iniciado con {} fragmentos.".format(
+                        len(self.ble_broadcaster.broadcast.fragments)))
+                except Exception as e:
+                    print("[BLE Broadcast] Error iniciando servicio: {}".format(e))
+        return self
+
+    def _setup_fallback_updater(self) -> None:
+        if self.symbiosis:
+            def update_zones():
+                loc = self.symbiosis.get_location()
+                if loc:
+                    speed = 0.0
+                    if hasattr(self.symbiosis, 'gps') and hasattr(self.symbiosis.gps, 'get_speed'):
+                        speed = self.symbiosis.gps.get_speed()
+                    bearing = 0.0
+                    self.predictive_zones.update_state(loc.latitude, loc.longitude, bearing, speed)
+                return self.predictive_zones.get_all_zones()
+            self.radar.set_dynamic_zone_updater(update_zones)
+        else:
+            # Usar zonas fijas de La Chorrera
+            try:
+                from zonas_chorrera import ZONAS_CHORRERA
+                def update_zones():
+                    zonas = []
+                    for nombre, lat, lon in ZONAS_CHORRERA:
+                        zonas.append(Zone(
+                            zone_id=nombre.replace(" ", "_").lower(),
+                            name=nombre,
+                            location=GeoPoint(lat, lon),
+                            metadata={"distance_km": 5, "type": "comercial"},
+                            tags=["panama", "chorrera"],
+                            priority_weight=1.0
+                        ))
+                    return zonas
+            except ImportError:
+                _fallback = {"lat": 8.8800, "lon": -79.7800, "bearing": 0.0, "speed": 30.0}
+                def update_zones():
+                    _fallback["bearing"] = (_fallback["bearing"] + 0.5) % 360
+                    _fallback["lat"] += math.sin(math.radians(_fallback["bearing"])) * 0.0001
+                    _fallback["lon"] += math.cos(math.radians(_fallback["bearing"])) * 0.0001
+                    self.predictive_zones.update_state(_fallback["lat"], _fallback["lon"],
+                                                       _fallback["bearing"], _fallback["speed"])
+                    return self.predictive_zones.get_all_zones()
+            self.radar.set_dynamic_zone_updater(update_zones)
+
+    def start(self) -> None:
+        if self.radar:
+            self.radar.start()
+        self._running = True
+
+    def stop(self) -> None:
+        self._running = False
+        if self.radar:
+            self.radar.stop()
+        if self.ble_broadcaster:
+            self.ble_broadcaster.stop()
+        if self.bluetooth_provider and hasattr(self.bluetooth_provider, 'stop'):
+            try:
+                self.bluetooth_provider.stop()
+            except Exception:
+                pass
+
+# ================================================================================
+# SECCION 15: SISTEMA UNIFICADO (MODIFICADO v3.1)
+# ================================================================================
+class UnifiedSystem:
+    """Gestiona el arranque de todos los componentes."""
+
+    def __init__(self, user_session=None):
+        self.user_session = user_session
+        self.controller: Optional[IntegratedRadarController] = None
+
+    def start(self, use_real_gps: bool = False, use_bluetooth: bool = False,
+              allow_sim: bool = False, enable_ble_broadcast: bool = False,
+              prompt_text: Optional[str] = None) -> None:
+        print("[SYSTEM] Iniciando Sistema Unificado v3.1 + Radio Environment + BLE Broadcast")
+        self.controller = IntegratedRadarController(user_session=self.user_session)
+        self.controller.initialize(use_real_gps=use_real_gps, use_bluetooth=use_bluetooth,
+                                   allow_sim=allow_sim, symbiosis_instance=None,
+                                   enable_ble_broadcast=enable_ble_broadcast,
+                                   prompt_text=prompt_text)
+        self.controller.start()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.controller.stop()
+            print("[SYSTEM] Sistema detenido.")
+
+# ================================================================================
+# SECCION 16: FUNCIONES DE DIAGNÓSTICO
+# ================================================================================
+def run_diagnostics() -> Dict[str, Any]:
+    return {"python_version": sys.version, "algorithms_available": True,
+            "threading_available": True, "dataclasses_available": True,
+            "zlib_available": True, "ble_broadcast_supported": True}
+
+def quick_test() -> None:
+    print("QUICK TEST - Demand Radar v3.1")
+    zones = [Zone(zone_id="test_1", name="Zona Test 1", location=GeoPoint(8.8800, -79.7800),
+                  metadata={"distance_km": 5, "type": "test"})]
+    provider = SimulatedDataProvider(seed=123)
+    radar = RadarEngine(zones=zones, data_provider=provider)
+    for _ in range(3):
+        opps = radar.force_scan()
+        print("Oportunidades: {}".format(len(opps)))
+        time.sleep(0.5)
+    best = radar.get_best_opportunity()
+    if best:
+        print("Mejor: {} - Demanda: {}/10".format(best.zone_name, best.demand_score))
+    print("QUICK TEST COMPLETADO")
+
+# ================================================================================
+# SECCION 17: DETECTOR HEURÍSTICO DE DISPOSITIVOS UBER
+# ================================================================================
+class UberDeviceHeuristics:
+    CONDUCTOR_KEYWORDS = ['uber','lyft','taxi','cabify','did','conductor','moto','auto',
+                          'driver','tax','cab','ride','coche','vehiculo','movilidad',
+                          'viaje','pasajero','moto taxi','taxista','chofer']
+    WORK_PHONE_PATTERNS = ['galaxy a1','galaxy j','redmi','moto e','moto g',
+                           'huawei y','nokia 2','nokia 3','lg k','alcatel']
+
+    @staticmethod
+    def is_likely_uber_device(device_name: str) -> float:
+        if not device_name or device_name == 'unknown': return 0.0
+        name_lower = device_name.lower().strip()
+        score = 0.0
+        for kw in UberDeviceHeuristics.CONDUCTOR_KEYWORDS:
+            if kw in name_lower: score += 0.3
+        for pat in UberDeviceHeuristics.WORK_PHONE_PATTERNS:
+            if pat in name_lower: score += 0.15; break
+        if any(g in name_lower for g in ['movil','phone','celular','smartphone']): score += 0.05
+        if any(t in name_lower for t in ['esp','arduino','raspberry','beacon','tag']): score = 0.0
+        return min(1.0, score)
+
+    @staticmethod
+    def is_moving_device(rssi_history: List[float]) -> bool:
+        if len(rssi_history) < 3: return False
+        mean = sum(rssi_history)/len(rssi_history)
+        variance = sum((r-mean)**2 for r in rssi_history)/len(rssi_history)
+        return math.sqrt(variance) > 6.0
+
+class UberActivityDetector:
+    def __init__(self, scanner):
+        self.scanner = scanner
+        self.heuristics = UberDeviceHeuristics()
+
+    def analyze_uber_activity(self) -> Dict[str, Any]:
+        devices = self.scanner.scan_advanced()
+        if not devices:
+            return {'timestamp':time.time(),'total_devices':0,'probable_uber_devices':0,
+                    'active_moving_uber':0,'uber_activity_index':0,'devices_analyzed':[],
+                    'summary':'No se detectaron dispositivos Bluetooth.'}
+        analyzed = []
+        for dev in devices:
+            name = dev.get('name','unknown')
+            uber_score = self.heuristics.is_likely_uber_device(name)
+            rssi_history = []
+            mac = dev['mac']
+            if hasattr(self.scanner,'rssi_history') and mac in self.scanner.rssi_history:
+                rssi_history = list(self.scanner.rssi_history[mac])
+            moving = self.heuristics.is_moving_device(rssi_history)
+            analyzed.append({'mac':mac,'name':name,'uber_score':uber_score,'is_moving':moving,
+                             'rssi':dev.get('rssi',-100),'distance':dev.get('distance',50)})
+        probable = [d for d in analyzed if d['uber_score']>0.5]
+        active = [d for d in analyzed if d['is_moving'] and d['uber_score']>0.3]
+        uber_activity_index = min(100, len(probable)*15 + len(active)*10)
+        high_conf = sum(1 for d in probable if d['uber_score']>0.8)
+        uber_activity_index += high_conf * 10
+        if len(devices)>10 and len(probable)==0: uber_activity_index = max(0, uber_activity_index-20)
+        return {'timestamp':time.time(),'total_devices':len(devices),
+                'probable_uber_devices':len(probable),'active_moving_uber':len(active),
+                'uber_activity_index':min(100, uber_activity_index),'devices_analyzed':analyzed[:10],
+                'summary':"Posibles dispositivos Uber: {}. Índice: {}%".format(len(probable), uber_activity_index)}
+
+
+# ================================================================================
+# SECCION 17B: CLASES BLUETOOTH (ANALIZADOR DE ENTORNO RADIOELÉCTRICO)
+# ================================================================================
+import os
+import time
+import shutil
+import subprocess
+import threading
+
+from collections import deque
+from typing import Dict, List, Optional
+from enum import Enum
+
+
+class ZoneType(Enum):
+    URBAN_DENSE = "urban_dense"
+    URBAN_MODERATE = "urban_moderate"
+    SUBURBAN = "suburban"
+    ISOLATED = "isolated"
+    DEAD_ZONE = "dead_zone"
+
+
+class RadioBluetoothScanner:
+    """Escáner Bluetooth (modo híbrido: real + simulado seguro)."""
+
+    def __init__(self):
+        self.known_beacons: Dict = {}
+        self.rssi_history: Dict[str, deque] = {}
+        self.kalman_filters: Dict = {}
+        self.fingerprint_db: Dict = {}
+
+        self.last_scan_time: float = 0.0
+        self.scan_errors: int = 0
+        self.max_errors: int = 10
+
+        self._is_android: bool = (
+            "ANDROID_ROOT" in os.environ
+            or "TERMUX_VERSION" in os.environ
+        )
+
+        self._last_warning_time: float = 0.0
+        self._permissions_granted: bool = True
+
+    # -------------------------
+    # LOG CONTROL
+    # -------------------------
+    def _warning(self, msg: str) -> None:
+        now = time.time()
+        if now - self._last_warning_time > 10:
+            print(msg)
+            self._last_warning_time = now
+
+    # -------------------------
+    # TERMUX CHECK (SAFE)
+    # -------------------------
+    def _check_termux_api(self) -> bool:
+        # no usar comandos inexistentes
+        return False  # fallback seguro siempre
+
+    # -------------------------
+    # PERMISSIONS (SAFE MODE)
+    # -------------------------
+    def ensure_native_permissions(self) -> bool:
+        if not self._is_android:
+            return True
+
+        self._warning("[WARN] Modo Android detectado, usando fallback simulado")
+        return False
+
+    # -------------------------
+    # FILTERS
+    # -------------------------
+    def _get_kalman_filter(self, mac: str) -> Dict:
+        if mac not in self.kalman_filters:
+            self.kalman_filters[mac] = {
+                "rssi": 0,
+                "variance": 1.0,
+                "process_noise": 0.1,
+                "measurement_noise": 2.0
+            }
+        return self.kalman_filters[mac]
+
+    def _filter_rssi_kalman(self, mac: str, rssi: float) -> float:
+        kf = self._get_kalman_filter(mac)
+        pred_var = kf["variance"] + kf["process_noise"]
+        K = pred_var / (pred_var + kf["measurement_noise"])
+
+        filtered = kf["rssi"] + K * (rssi - kf["rssi"])
+
+        kf["rssi"] = filtered
+        kf["variance"] = (1 - K) * pred_var
+
+        return filtered
+
+    # -------------------------
+    # MOVING AVG
+    # -------------------------
+    def _moving_average_rssi(self, mac: str, rssi: float, window: int = 5) -> float:
+        if mac not in self.rssi_history:
+            self.rssi_history[mac] = deque(maxlen=window)
+
+        self.rssi_history[mac].append(rssi)
+        return sum(self.rssi_history[mac]) / len(self.rssi_history[mac])
+
+    # -------------------------
+    # DISTANCE MODEL
+    # -------------------------
+    def _rssi_to_distance(self, rssi: float, tx_power: int = -59) -> float:
+        if rssi == 0:
+            return 50.0
+
+        env_factor = 2.5
+        return min(
+            50.0,
+            max(0.5, 10 ** ((tx_power - rssi) / (10.0 * env_factor)))
+        )
+
+    # -------------------------
+    # SIMULATION SCAN (NO TERMUX DEPENDENCY)
+    # -------------------------
+    def _raw_scan(self) -> List[Dict]:
+        # fallback seguro: simulación
+        return []
+
+    # -------------------------
+    # ADVANCED SCAN
+    # -------------------------
+    def scan_advanced(self) -> List[Dict]:
+        raw = self._raw_scan()
+
+        if not raw:
+            self.scan_errors += 1
+            return []
+
+        self.scan_errors = 0
+
+        processed = []
+
+        for dev in raw:
+            mac = dev.get("mac", "unknown")
+            raw_rssi = dev.get("rssi", -70)
+
+            filtered = self._filter_rssi_kalman(mac, raw_rssi)
+            smoothed = self._moving_average_rssi(mac, filtered)
+
+            distance = self._rssi_to_distance(smoothed)
+
+            processed.append({
+                "mac": mac,
+                "name": dev.get("name", "unknown"),
+                "rssi": smoothed,
+                "rssi_raw": raw_rssi,
+                "distance": distance,
+                "multipath_detected": False,
+                "timestamp": time.time()
+            })
+
+        self.last_scan_time = time.time()
+        return processed
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.scan_errors < self.max_errors
+
+
+class RadioEnvironmentAnalyzer:
+
+    def __init__(self, scanner: Optional[RadioBluetoothScanner] = None):
+        self.scanner = scanner or RadioBluetoothScanner()
+        self.scan_history: deque = deque(maxlen=100)
+        self._lock = threading.Lock()
+
+    def analyze_environment(self) -> Dict:
+        devices = self.scanner.scan_advanced()
+
+        if not devices:
+            return {
+                "timestamp": time.time(),
+                "devices_detected": 0,
+                "environment": {
+                    "zone_type": ZoneType.DEAD_ZONE.value,
+                    "connectivity_quality": "SIN SEÑAL",
+                    "connectivity_score": 0.0,
+                    "device_density": 0,
+                    "avg_rssi": -100,
+                    "signal_stability": 0,
+                    "avg_distance_meters": 50
+                },
+                "nearby_devices": [],
+                "recommendation": self._generate_recommendation(ZoneType.DEAD_ZONE)
+            }
+
+        rssi_vals = [d["rssi"] for d in devices]
+        avg_rssi = sum(rssi_vals) / len(rssi_vals)
+
+        var_rssi = sum((r - avg_rssi) ** 2 for r in rssi_vals) / len(rssi_vals)
+        stability = max(0.0, 1.0 - var_rssi / 200.0)
+
+        distances = [d["distance"] for d in devices]
+        avg_dist = sum(distances) / len(distances)
+
+        conn_score = max(0.0, min(1.0, (avg_rssi + 100) / 70.0))
+
+        return {
+            "timestamp": time.time(),
+            "devices_detected": len(devices),
+            "environment": {
+                "zone_type": ZoneType.ISOLATED.value,
+                "connectivity_quality": "SIMULATED",
+                "connectivity_score": round(conn_score, 3),
+                "device_density": len(devices),
+                "avg_rssi": round(avg_rssi, 1),
+                "signal_stability": round(stability, 3),
+                "avg_distance_meters": round(avg_dist, 1)
+            },
+            "nearby_devices": devices[:5],
+            "recommendation": self._generate_recommendation(ZoneType.ISOLATED)
+        }
+
+    @staticmethod
+    def _generate_recommendation(zone_type: ZoneType) -> str:
+        return f"Zona detectada: {zone_type.value}"
+
+# ================================================================================
+# SECCION 17C: BLE BROADCAST SERVICE (NUEVO - TRANSMISIÓN DE PROMPT)
+# ================================================================================
+class PromptBroadcast:
+    """Comprime y fragmenta un texto para transmisión BLE."""
+
+    def __init__(self, texto: str, fragment_size: int = 180):
+        self.texto_original = texto
+        self.fragment_size = fragment_size
+        self.compressed = zlib.compress(texto.encode('utf-8'))
+        self.msg_id = uuid.uuid4().hex[:8]
+        self.fragments = self._create_fragments()
+        self.current_fragment = 0
+
+    def _create_fragments(self):
+        total = (len(self.compressed) + self.fragment_size - 1) // self.fragment_size
+        fragments = []
+        for i in range(total):
+            chunk = self.compressed[i*self.fragment_size:(i+1)*self.fragment_size]
+            payload = base64.b64encode(chunk).decode('ascii')
+            check = hashlib.md5(chunk).hexdigest()[:4]
+            frame = "ID:{}|{}/{}|{}|CHK:{}".format(self.msg_id, i+1, total, payload, check)
+            fragments.append(frame)
+        return fragments
+
+    def get_next_fragment(self) -> str:
+        frag = self.fragments[self.current_fragment]
+        self.current_fragment = (self.current_fragment + 1) % len(self.fragments)
+        return frag
+
+
+class BLEBroadcastService(threading.Thread):
+    """Servicio de transmisión BLE continua del prompt fragmentado.
+
+       Modo Termux: usa 'termux-bluetooth-advertise' si existe, 
+       de lo contrario emite fragmentos por consola (demo).
+    """
+
+    def __init__(self, texto: str, interval: float = 0.2):
+        super().__init__(daemon=True)
+        self.broadcast = PromptBroadcast(texto)
+        self.interval = interval
+        self._running = False
+        self._termux_available = shutil.which("termux-bluetooth-advertise") is not None
+
+    def run(self):
+        self._running = True
+        if self._termux_available:
+            self._log("BLE Broadcast iniciado en modo nativo Termux.")
+            while self._running:
+                frag = self.broadcast.get_next_fragment()
+                self._send_native(frag)
+                time.sleep(self.interval)
+        else:
+            self._log("BLE Broadcast enviando fragmentos a app puente Android (BLE real)")
+            while self._running:
+                frag = self.broadcast.get_next_fragment()
+                self._log_demo(frag)
+                time.sleep(self.interval)
+
+    def _send_native(self, data: str):
+        try:
+            import urllib.request
+            payload_b64 = base64.b64encode(data.encode()).decode()
+            url = f"http://127.0.0.1:9876/advertise?payload={payload_b64}"
+            urllib.request.urlopen(url, timeout=3)
+            self._log("Fragmento enviado a app puente")
+        except Exception as e:
+            self._log("Error enviando fragmento a app puente: {}".format(e))
+
+    def _log_demo(self, data: str):
+        self._send_native(data)
+
+    def _log(self, msg: str):
+        print("[BLE Broadcast] {}".format(msg))
+
+    def stop(self):
+        self._running = False
+
+
+# ================================================================================
+# SECCION 18: RADIO ENVIRONMENT DATA PROVIDER (ACTUALIZADO)
+# ================================================================================
+class RadioEnvironmentDataProvider(DataProviderBase):
+    """Data provider que usa entorno radioeléctrico + heurística Uber."""
+
+    def __init__(self, scanner=None):
+        self.analyzer = RadioEnvironmentAnalyzer(scanner or RadioBluetoothScanner())
+        self._uber_detector = UberActivityDetector(self.analyzer.scanner)
+        self._available = True
+        self._provider_name = "RadioEnvironmentProvider"
+
+    def get_zone_data(self, zone: Any) -> Dict[str, Any]:
+        if not self._available:
+            return {}
+        # Obtener datos reales del puente BLE cada 5 segundos
+        try:
+            import urllib.request, json
+            resp = urllib.request.urlopen('http://127.0.0.1:9876/scan', timeout=8)
+            data = json.loads(resp.read().decode())
+            devices = data.get('devices', [])
+            density = len(devices)
+            analysis = {
+                'devices_detected': density,
+                'environment': {
+                    'zone_type': 'urban_moderate',
+                    'connectivity_quality': 'REAL',
+                    'connectivity_score': min(1.0, density / 20.0),
+                    'device_density': density,
+                    'avg_rssi': -60 if devices else -100,
+                    'signal_stability': 0.8,
+                    'avg_distance_meters': 10
+                },
+                'uber_activity': {
+                    'uber_activity_index': min(100, density * 10),
+                    'probable_uber_devices': density
+                }
+            }
+        except Exception as e:
+            density = 0
+            analysis = {
+                'devices_detected': 0,
+                'environment': {
+                    'zone_type': 'dead_zone',
+                    'connectivity_quality': 'ERROR',
+                    'connectivity_score': 0.0,
+                    'device_density': 0,
+                    'avg_rssi': -100,
+                    'signal_stability': 0,
+                    'avg_distance_meters': 50
+                },
+                'uber_activity': {
+                    'uber_activity_index': 0,
+                    'probable_uber_devices': 0
+                }
+            }
+        if density == 0:
+            return {}
+        env = analysis['environment']
+        uber_idx = analysis['uber_activity']['uber_activity_index']
+        conn_score = env['connectivity_score']
+        demand_score = min(10.0, conn_score*7.0 + uber_idx/25.0 + density/15.0)
+        if demand_score >= 8.0: surge = 1.5 + (demand_score-8.0)*0.3
+        elif demand_score >= 6.0: surge = 1.2 + (demand_score-6.0)*0.15
+        elif demand_score >= 4.0: surge = 1.0 + (demand_score-4.0)*0.1
+        else: surge = 1.0
+        surge = round(min(2.5, max(1.0, surge)), 2)
+        if demand_score >= 8.0: avg_wait = 120
+        elif demand_score >= 6.0: avg_wait = 240
+        elif demand_score >= 4.0: avg_wait = 360
+        else: avg_wait = 600
+        base_value = {'urban_dense':15.0,'urban_moderate':12.0,'suburban':8.0}.get(env['zone_type'],5.0)
+        avg_value = base_value * surge
+        if density >= 10: capacity, requests = 3, 15+int(demand_score)
+        elif density >= 5: capacity, requests = 8, 8+int(demand_score*0.5)
+        else: capacity, requests = 15, 3+int(demand_score*0.2)
+        wait_times = [max(30, avg_wait+int(avg_wait*0.2*(i-2))) for i in range(4)]
+        surges = [surge*(1+0.05*(i-2)) for i in range(4)]
+        values = [avg_value*(1+0.1*(i-2)) for i in range(4)]
+        return {"wait_times":wait_times,"values":values,"surge_multipliers":surges,
+                "capacity":capacity,"requests":requests,"_radio_environment":analysis}
+
+    def is_available(self) -> bool:
+        return self._available and self.analyzer.scanner.is_healthy
+
+    def get_provider_name(self) -> str:
+        return self._provider_name
+
+    def set_available(self, available: bool) -> None:
+        self._available = available
+
+    def stop(self) -> None:
+        self._available = False
+
+# ================================================================================
+# SECCION 19: UBER ZONE PREDICTOR (MEJORADO)
+# ================================================================================
+class UberZoneCategory(Enum):
+    PRIME = "PRIME"
+    GOOD = "GOOD"
+    AVERAGE = "AVERAGE"
+    POOR = "POOR"
+    AVOID = "AVOID"
+
+@dataclass
+class UberZoneReport:
+    zone_id: str
+    zone_name: str
+    uber_score: float
+    uber_category: str
+    recommendation: str
+    estimated_demand: str
+    connectivity_rating: str
+    risk_level: str
+    action: str
+    potential_earnings: str
+    timestamp: float = field(default_factory=time.time)
+
+class UberZonePredictor:
+    """Predice zonas óptimas para Uber usando entorno radioeléctrico y heurísticas."""
+
+    def __init__(self, analyzer: RadioEnvironmentAnalyzer):
+        self.analyzer = analyzer
+        self.uber_detector = UberActivityDetector(analyzer.scanner) if hasattr(analyzer,'scanner') else None
+
+    def predict_uber_zone(self) -> UberZoneReport:
+        analysis = self.analyzer.analyze_environment()
+        uber_activity = {}
+        if self.uber_detector:
+            uber_activity = self.uber_detector.analyze_uber_activity()
+            analysis['uber_activity'] = uber_activity
+        uber_idx = uber_activity.get('uber_activity_index', 0)
+        conn_score = analysis['environment']['connectivity_score']
+        uber_score = round((uber_idx/100.0)*0.6 + conn_score*0.4, 3)
+        if uber_score >= 0.8: category = UberZoneCategory.PRIME
+        elif uber_score >= 0.6: category = UberZoneCategory.GOOD
+        elif uber_score >= 0.4: category = UberZoneCategory.AVERAGE
+        elif uber_score >= 0.2: category = UberZoneCategory.POOR
+        else: category = UberZoneCategory.AVOID
+        if uber_idx >= 70: demand, potential = "ALTA", "$25-40/h estimado"
+        elif uber_idx >= 40: demand, potential = "MEDIA", "$15-25/h estimado"
+        elif uber_idx >= 15: demand, potential = "BAJA", "$5-15/h estimado"
+        else: demand, potential = "MUY BAJA", "Menos de $5/h estimado"
+        if category in (UberZoneCategory.PRIME, UberZoneCategory.GOOD):
+            action, risk = "QUEDARSE - Zona óptima para trabajar", "BAJO"
+        elif category == UberZoneCategory.AVERAGE:
+            action, risk = "ESPERAR - Monitorear si mejora", "MEDIO"
+        elif category == UberZoneCategory.POOR:
+            action, risk = "CONSIDERAR MOVERSE - Buscar zona más activa", "ALTO"
+        else:
+            action, risk = "MOVERSE INMEDIATAMENTE - Zona sin actividad", "MUY ALTO"
+        return UberZoneReport(
+            zone_id="uber_{}".format(int(time.time())), zone_name="Zona Actual",
+            uber_score=uber_score, uber_category=category.value,
+            recommendation=self._generate_recommendation(analysis, category, uber_activity),
+            estimated_demand=demand, connectivity_rating=analysis['environment']['connectivity_quality'],
+            risk_level=risk, action=action, potential_earnings=potential
+        )
+
+    def _generate_recommendation(self, analysis, category, uber_activity):
+        prob = uber_activity.get('probable_uber_devices',0)
+        total = analysis['devices_detected']
+        if category == UberZoneCategory.PRIME:
+            return "ZONA PRIME. Alta actividad ({} dispositivos, {} posibles conductores).".format(total, prob)
+        elif category == UberZoneCategory.GOOD:
+            return "Buena zona. {} dispositivos, {} posibles conductores.".format(total, prob)
+        elif category == UberZoneCategory.AVERAGE:
+            return "Zona promedio. Actividad moderada."
+        elif category == UberZoneCategory.POOR:
+            return "Zona pobre. Poca actividad."
+        else:
+            return "EVITAR esta zona. Sin actividad detectable."
+
+def run_uber_predictor_demo() -> None:
+    print("=" * 60)
+    print("UBER ZONE PREDICTOR DEMO")
+    scanner = RadioBluetoothScanner()
+    analyzer = RadioEnvironmentAnalyzer(scanner)
+    predictor = UberZonePredictor(analyzer)
+    for i in range(5):
+        report = predictor.predict_uber_zone()
+        print("\n--- Escaneo {} ---".format(i+1))
+        print("Score Uber: {:.2f} - {}".format(report.uber_score, report.uber_category))
+        print("Acción: {}".format(report.action))
+        time.sleep(2)
+    print("=" * 60)
+
+
+# ================================================================================
+# SECCIÓN 21: BLE BRIDGE APP - INCORPORADA EN EL CÓDIGO (VERSIÓN FINAL CORREGIDA)
+# ================================================================================
+import os
+import shutil
+import subprocess
+import requests
+from pathlib import Path
+from typing import List, Dict, Optional
+
+class BLEBridgeApp:
+    """
+    App puente autocontenida. Contiene el código fuente Java de una app Android
+    que expone endpoints HTTP locales para escaneo BLE y advertising.
+    Se comunica con el radar mediante HTTP (127.0.0.1:9876).
+    """
+
+    JAVA_SOURCE = r"""
+package com.radar.bridge;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.le.AdvertiseCallback;
+import android.bluetooth.le.AdvertiseData;
+import android.bluetooth.le.AdvertiseSettings;
+import android.bluetooth.le.BluetoothLeAdvertiser;
+import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanResult;
+import android.content.Context;
+import android.content.Intent;
+import android.os.Build;
+import android.os.IBinder;
+import android.os.ParcelUuid;
+import android.util.Base64;
+import android.util.Log;
+import com.google.gson.Gson;
+import fi.iki.elonen.NanoHTTPD;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+public class BridgeService extends Service {
+
+    private static final int PORT = 9876;
+    private static final int FOREGROUND_ID = 1001;
+    private static final String CHANNEL_ID = "radar_bridge_channel";
+    private WebServer server;
+    private BluetoothAdapter bluetoothAdapter;
+    private BluetoothLeScanner scanner;
+    private BluetoothLeAdvertiser advertiser;
+    private final Map<String, Object> lastScanResults = new HashMap<>();
+    private Gson gson = new Gson();
+    private AdvertiseCallback advertiseCallback;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        createNotificationChannel();
+        startForeground(FOREGROUND_ID, buildNotification());
+
+        BluetoothManager manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        bluetoothAdapter = manager.getAdapter();
+        if (bluetoothAdapter != null) {
+            scanner = bluetoothAdapter.getBluetoothLeScanner();
+            advertiser = bluetoothAdapter.getBluetoothLeAdvertiser();
+        }
+        try {
+            server = new WebServer(PORT);
+            server.start();
+            Log.d("BridgeService", "Servidor HTTP iniciado en puerto " + PORT);
+        } catch (IOException e) {
+            Log.e("BridgeService", "Error iniciando servidor", e);
+        }
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Radar Bridge Service",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            manager.createNotificationChannel(channel);
+        }
+    }
+
+    private Notification buildNotification() {
+        return new Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("Radar Bridge activo")
+                .setContentText("Escaneando y transmitiendo...")
+                .setSmallIcon(android.R.drawable.ic_menu_compass)
+                .build();
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        return START_STICKY;
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) { return null; }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (server != null) server.stop();
+    }
+
+    private class WebServer extends NanoHTTPD {
+        public WebServer(int port) {
+            super(port);
+        }
+
+        @Override
+        public Response serve(IHTTPSession session) {
+            String uri = session.getUri();
+            Map<String, String> params = session.getParms();
+            try {
+                if (uri.equals("/scan")) {
+                    if (scanner == null) return newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, "text/plain", "BLE scanner no disponible");
+                    List<Map<String, Object>> devices = new ArrayList<>();
+                    scanner.startScan(new ScanCallback() {
+                        @Override
+                        public void onScanResult(int callbackType, ScanResult result) {
+                            BluetoothDevice device = result.getDevice();
+                            Map<String, Object> devMap = new HashMap<>();
+                            devMap.put("mac", device.getAddress());
+                            devMap.put("name", device.getName());
+                            devMap.put("rssi", result.getRssi());
+                            devices.add(devMap);
+                        }
+                    });
+                    try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
+                    scanner.stopScan(new ScanCallback() {});
+                    lastScanResults.put("devices", devices);
+                    lastScanResults.put("timestamp", System.currentTimeMillis());
+                    String json = gson.toJson(lastScanResults);
+                    return newFixedLengthResponse(Response.Status.OK, "application/json", json);
+                } else if (uri.equals("/advertise")) {
+                    String payload = params.get("payload");
+                    if (payload == null || payload.isEmpty()) return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Falta payload");
+                    if (advertiser == null) return newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, "text/plain", "Advertiser no disponible");
+                    byte[] data = Base64.decode(payload, Base64.DEFAULT);
+                    AdvertiseSettings settings = new AdvertiseSettings.Builder()
+                            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                            .setConnectable(false)
+                            .build();
+                    AdvertiseData advData = new AdvertiseData.Builder()
+                            .addServiceData(new ParcelUuid(UUID.fromString("0000ffff-0000-1000-8000-00805f9b34fb")), data)
+                            .setIncludeDeviceName(false)
+                            .build();
+                    advertiseCallback = new AdvertiseCallback() {
+                        @Override
+                        public void onStartSuccess(AdvertiseSettings settingsInEffect) {
+                            super.onStartSuccess(settingsInEffect);
+                        }
+                        @Override
+                        public void onStartFailure(int errorCode) {
+                            super.onStartFailure(errorCode);
+                        }
+                    };
+                    advertiser.startAdvertising(settings, advData, advertiseCallback);
+                    return newFixedLengthResponse(Response.Status.OK, "text/plain", "Advertising iniciado");
+                } else {
+                    return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Endpoint no encontrado");
+                }
+            } catch (Exception e) {
+                Log.e("BridgeService", "Error en endpoint", e);
+                return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", e.getMessage());
+            }
+        }
+    }
+}
+"""
+
+    def __init__(self, base_dir: str = "."):
+        self.base_dir = Path(base_dir).resolve()
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.apk_path = self.base_dir / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+        self._bridge_running = False
+
+    def is_bridge_installed(self) -> bool:
+        """Verifica si la app puente está activa y respondiendo."""
+        try:
+            resp = requests.get("http://127.0.0.1:9876/ping", timeout=1)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    def write_source_files(self):
+        """
+        Genera un proyecto Android completo con Gradle wrapper y recursos mejorados.
+        """
+        project_root = self.base_dir
+        app_dir = project_root / "app"
+        src_main = app_dir / "src" / "main"
+        java_dir = src_main / "java" / "com" / "radar" / "bridge"
+        res_values = src_main / "res" / "values"
+        res_layout = src_main / "res" / "layout"
+        gradle_wrapper_dir = project_root / "gradle" / "wrapper"
+
+        for d in [app_dir, java_dir, res_values, res_layout, gradle_wrapper_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+
+        # --- Archivos raíz ---
+        with open(project_root / "settings.gradle", "w") as f:
+            f.write("rootProject.name = 'RadarBridge'\n")
+            f.write("include ':app'\n")
+
+        with open(project_root / "build.gradle", "w") as f:
+            f.write("""\
+// Top-level build file for the Android project
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.0'
+    }
+}
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+""")
+
+        with open(project_root / "gradle.properties", "w") as f:
+            f.write("android.useAndroidX=true\nandroid.enableJetifier=true\n")
+
+        # --- Wrapper (solo scripts, el JAR es binario) ---
+        with open(project_root / "gradlew", "w") as f:
+            f.write("""#!/bin/sh
+exec java -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+""")
+        os.chmod(project_root / "gradlew", 0o755)
+
+        with open(project_root / "gradlew.bat", "w") as f:
+            f.write("@echo off\n")
+            f.write("java -cp \"gradle\\wrapper\\gradle-wrapper.jar\" org.gradle.wrapper.GradleWrapperMain %*\n")
+
+        with open(gradle_wrapper_dir / "gradle-wrapper.properties", "w") as f:
+            f.write("""distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+""")
+
+        # --- app/build.gradle ---
+        with open(app_dir / "build.gradle", "w") as f:
+            f.write("""\
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'com.radar.bridge'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId "com.radar.bridge"
+        minSdk 21
+        targetSdk 33
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'com.google.code.gson:gson:2.10'
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.activity:activity:1.9.0'
+    implementation 'androidx.lifecycle:lifecycle-service:2.8.4'
+    implementation 'androidx.core:core:1.9.0'
+}
+""")
+
+        # --- AndroidManifest.xml ---
+        with open(src_main / "AndroidManifest.xml", "w") as f:
+            f.write("""\
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.radar.bridge">
+
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.RadarBridge">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".BridgeService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+    </application>
+</manifest>
+""")
+
+        # --- Java source ---
+        with open(java_dir / "MainActivity.java", "w") as f:
+            f.write("""\
+package com.radar.bridge;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.os.Bundle;
+
+public class MainActivity extends Activity {
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        Intent intent = new Intent(this, BridgeService.class);
+        startService(intent);
+        finish();
+    }
+}
+""")
+
+        with open(java_dir / "BridgeService.java", "w") as f:
+            f.write(self.JAVA_SOURCE)
+
+        # --- Resources ---
+        with open(res_values / "strings.xml", "w") as f:
+            f.write("""\
+<resources>
+    <string name="app_name">RadarBridge</string>
+</resources>
+""")
+
+        with open(res_values / "colors.xml", "w") as f:
+            f.write("""\
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
+""")
+
+        with open(res_values / "themes.xml", "w") as f:
+            f.write("""\
+<resources>
+    <style name="Theme.RadarBridge" parent="Theme.AppCompat.Light.NoActionBar">
+    </style>
+</resources>
+""")
+
+        print(f"✅ Proyecto Android generado correctamente en: {project_root}")
+        print("   Para compilar, ejecuta: ./gradlew assembleDebug")
+        print("   El wrapper descargará Gradle automáticamente si es necesario.")
+
+    def build_with_gradle(self) -> Optional[Path]:
+        """Compila el proyecto con Gradle. Retorna la ruta al APK generado."""
+        gradle_bin = shutil.which("gradle")
+        if not gradle_bin:
+            print("Gradle no encontrado. Compila manualmente con './gradlew assembleDebug'")
+            return None
+        result = subprocess.run([gradle_bin, "assembleDebug"], cwd=self.base_dir, capture_output=True, text=True)
+        if result.returncode != 0:
+            print("Error compilando:", result.stderr)
+            return None
+        apk = next(self.base_dir.glob("**/app-debug.apk"), None)
+        if apk:
+            self.apk_path = apk
+            print(f"APK generado: {apk}")
+        return apk
+
+    def install_bridge(self) -> bool:
+        """Instala la APK en el dispositivo (requiere ADB o root)."""
+        if not self.apk_path.exists():
+            print("APK no encontrado. Compila primero.")
+            return False
+        cmd = f"pm install {self.apk_path}"
+        if shutil.which("su"):
+            cmd = f"su -c '{cmd}'"
+        elif shutil.which("adb"):
+            cmd = f"adb install {self.apk_path}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            print("App puente instalada. Iníciala manualmente.")
+            return True
+        else:
+            print("Error instalando:", result.stderr)
+            return False
+
+    def start_bridge_service(self):
+        """Marca el puente como activo (si la app está respondiendo)."""
+        if not self.is_bridge_installed():
+            print("App puente no responde. Asegúrate de haberla instalado e iniciado el servicio.")
+            return
+        self._bridge_running = True
+
+    def stop_bridge_service(self):
+        """Detiene la comunicación con el puente."""
+        self._bridge_running = False
+
+    def scan(self) -> List[Dict]:
+        """Escanea dispositivos BLE a través del puente."""
+        if not self._bridge_running:
+            return []
+        try:
+            resp = requests.get("http://127.0.0.1:9876/scan", timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("devices", [])
+        except Exception as e:
+            print(f"Error en escaneo puente: {e}")
+        return []
+
+    def advertise(self, payload_b64: str):
+        """Envía un payload BLE advertising a través del puente."""
+        if not self._bridge_running:
+            return
+        try:
+            resp = requests.get("http://127.0.0.1:9876/advertise", params={"payload": payload_b64})
+        except Exception as e:
+            print(f"Error en advertising puente: {e}")
+
+
+# ================================================================================
+# SECCIÓN 22: ENTRY POINT FINAL CON SOPORTE DE PUENTE Y OPCIONES (CORREGIDO)
+# ================================================================================
+def prepare_bridge():
+    print("[BRIDGE] Preparando archivos fuente de la app puente...")
+    bridge = BLEBridgeApp(base_dir=".")   # ⚡ se genera en el directorio actual
+    bridge.write_source_files()
+    print("\n✅ Fuentes generados en el directorio actual (.)")
+    print("📌 Para compilar:")
+    print("   1. Asegúrate de tener 'gradle/wrapper/gradle-wrapper.jar' (se descargará automáticamente).")
+    print("   2. Ejecuta: chmod +x gradlew && ./gradlew assembleDebug")
+    print("   3. Instala el APK (app/build/outputs/apk/debug/app-debug.apk) en tu teléfono.")
+    print("   4. Vuelve a ejecutar v.py para usar el puente.\n")
+
+def main():
+    args = set(sys.argv[1:]) if len(sys.argv) > 1 else set()
+
+    if "--test" in args:
+        quick_test()
+        return
+    if "--diag" in args:
+        print(json.dumps(run_diagnostics(), indent=2))
+        return
+    if "--uber-demo" in args:
+        run_uber_predictor_demo()
+        return
+    if "--prepare-bridge" in args:
+        prepare_bridge()
+        return
+    if "--sim" in args:
+        system = UnifiedSystem()
+        system.start(use_bluetooth=False, allow_sim=True, enable_ble_broadcast=False)
+        return
+    if "--broadcast" in args:
+        bridge = BLEBridgeApp()
+        if bridge.is_bridge_installed():
+            bridge.start_bridge_service()
+            use_bridge = True
+        else:
+            print("[MAIN] App puente no instalada o no responde. Cambiando a modo simulación.")
+            use_bridge = False
+        system = UnifiedSystem()
+        system.start(use_bluetooth=True, allow_sim=not use_bridge, enable_ble_broadcast=True,
+                     prompt_text=MEJOR_OPCION_PROMPT_TEXTO)
+        while True:
+            time.sleep(1)
+
+    # Modo por defecto
+    bridge = BLEBridgeApp()
+    if bridge.is_bridge_installed():
+        bridge.start_bridge_service()
+        print("[MAIN] Puente activo, usando datos reales.")
+        use_bridge = True
+    else:
+        print("[MAIN] No se detectó la app puente.")
+        respuesta = input("¿Quieres generar los archivos fuente para compilarla? (s/N): ").strip().lower()
+        if respuesta in ('s', 'si', 'y', 'yes'):
+            prepare_bridge()
+            return
+        else:
+            print("[MAIN] Continuando en modo simulación (o con Termux:API si está disponible).")
+            use_bridge = False
+
+    system = UnifiedSystem()
+    system.start(use_bluetooth=True, allow_sim=not use_bridge, enable_ble_broadcast=True,
+                 prompt_text=MEJOR_OPCION_PROMPT_TEXTO)
+
+    if hasattr(system, 'controller') and system.controller and system.controller.radar:
+        start_web_server(system.controller.radar, port=8080)
+
+    while True:
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main()

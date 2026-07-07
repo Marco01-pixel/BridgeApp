@@ -1,1 +1,8 @@
 GPS_Bridge/GPS-Bridge/
+.gradle/
+build/
+**/build/
+__pycache__/
+venv/
+*.pyc
+local.properties
