@@ -1,0 +1,13 @@
+package androidx.core.content.res;
+
+import android.content.res.Resources;
+
+/* JADX INFO: loaded from: /data/data/com.termux/files/home/BridgeApp/apk_edit/classes.dex */
+public final class ConfigurationHelper {
+    private ConfigurationHelper() {
+    }
+
+    public static int getDensityDpi(Resources resources) {
+        return resources.getConfiguration().densityDpi;
+    }
+}

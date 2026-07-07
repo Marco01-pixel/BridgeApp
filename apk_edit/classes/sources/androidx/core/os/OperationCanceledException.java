@@ -1,0 +1,14 @@
+package androidx.core.os;
+
+import androidx.core.util.ObjectsCompat;
+
+/* JADX INFO: loaded from: /data/data/com.termux/files/home/BridgeApp/apk_edit/classes.dex */
+public class OperationCanceledException extends RuntimeException {
+    public OperationCanceledException() {
+        this(null);
+    }
+
+    public OperationCanceledException(String message) {
+        super(ObjectsCompat.toString(message, "The operation has been canceled."));
+    }
+}

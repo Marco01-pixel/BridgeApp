@@ -1,0 +1,17 @@
+package com.google.errorprone.annotations;
+
+/* JADX INFO: loaded from: /data/data/com.termux/files/home/BridgeApp/apk_temp/classes.dex */
+public enum Modifier {
+    PUBLIC,
+    PROTECTED,
+    PRIVATE,
+    ABSTRACT,
+    DEFAULT,
+    STATIC,
+    FINAL,
+    TRANSIENT,
+    VOLATILE,
+    SYNCHRONIZED,
+    NATIVE,
+    STRICTFP
+}

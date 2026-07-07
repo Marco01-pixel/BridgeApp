@@ -1,0 +1,11 @@
+package com.google.errorprone.annotations;
+
+import java.lang.annotation.Documented;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Target;
+
+/* JADX INFO: loaded from: /data/data/com.termux/files/home/BridgeApp/apk_temp/classes.dex */
+@Target({ElementType.METHOD})
+@Documented
+public @interface NoAllocation {
+}
