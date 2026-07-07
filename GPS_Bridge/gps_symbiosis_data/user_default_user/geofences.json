@@ -1,0 +1,16 @@
+[
+  {
+    "id": "base",
+    "center": {
+      "latitude": 8.87797,
+      "longitude": -79.766855,
+      "altitude": 0.0,
+      "accuracy": 0.0,
+      "source": "unknown",
+      "timestamp": 1783370678.592047
+    },
+    "radius_km": 0.5,
+    "created_at": "2026-07-06T20:44:38.592229+00:00",
+    "metadata": {}
+  }
+]

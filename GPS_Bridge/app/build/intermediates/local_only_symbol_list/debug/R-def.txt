@@ -1,0 +1,14 @@
+R_DEF: Internal format may change without notice
+local
+color black
+color purple_500
+color purple_700
+color teal_700
+color white
+drawable ic_launcher
+id installTermuxButton
+id serviceStatusTextView
+id startButton
+id statusTextView
+layout activity_main
+string app_name
